@@ -1,0 +1,40 @@
+{
+  "extends": "./.dsh/tsconfig.base.client.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist/types",
+    "tsBuildInfoFile": "dist/tsconfig.tsbuildinfo"
+  },
+  "include": [
+    "src"
+  ],
+  "references": [
+    {
+      "path": "./.dsh/vendor/cordis"
+    },
+    {
+      "path": "./.dsh/vendor/schemastery"
+    },
+    {
+      "path": "./.dsh/packages/core/system-prompt"
+    },
+    {
+      "path": "./.dsh/packages/settings/settings"
+    },
+    {
+      "path": "./.dsh/packages/client/connection"
+    },
+    {
+      "path": "./.dsh/packages/client/runtime"
+    },
+    {
+      "path": "./.dsh/packages/client/ui-slots"
+    },
+    {
+      "path": "./.dsh/packages/client/web-react"
+    },
+    {
+      "path": "./.dsh/packages/client/ui-conversation"
+    }
+  ]
+}
