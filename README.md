@@ -30,6 +30,10 @@ export DSH_HOME=/path/to/dsh-data
 
 若当前 DSH 组合仍加载 monorepo 内的 `@deepseek-ai/dsh-client-ui-prompt-studio`，请先把对应 Loader 行设为 `disabled: true`。两种分发形态拥有同一个配置段与同一个对话页视图编号，不能同时挂载；原包可以保留在源码树中作为回退。
 
+## 已知前提
+
+浏览器端读写 `prompt-studio` 配置段，需要宿主的 `packages/host/apiproxy/src/api-proxy.ts` 在 `PRODUCT_SETTINGS_NAMESPACES` 白名单中加入 `'prompt-studio'`，否则读写请求会被拒绝（错误码 `settings-not-exposed`）。这是 DSH 配置开放机制的现状，并非本插件缺陷；官方已记录改进方向（见 issue #349）。在干净环境上安装插件后若保存无效，请先检查该项。
+
 ## 使用
 
 1. 打开任意对话，选择 **Prompt Studio** 标签页。
