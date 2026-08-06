@@ -18,6 +18,7 @@ import {
   PROMPT_STUDIO_OVERRIDE_MARKER_PREFIX,
   PROMPT_STUDIO_STATE_PATH,
   isNativeOverride,
+  renderSupplementBoundary,
   validatePromptComponents,
   type NativeOverride,
   type PromptComponent,
@@ -35,6 +36,7 @@ export {
   nextOverrideId,
   nextSupplementId,
   renderSystemPreview,
+  renderSupplementBoundary,
   validatePromptComponents,
 } from './shared.ts'
 export type {
@@ -58,6 +60,7 @@ export const name = 'client-ui-prompt-studio'
 export const inject = ['settings', 'systemPrompt', 'llm']
 
 const REQUEST_SOURCE = 'moeblack/prompt-studio'
+const SYSTEM_SECTION_PREFIX = 'prompt-studio:supplement-section:'
 
 interface HttpRequestLike {
   method?: string
@@ -86,6 +89,10 @@ function markerName(target: string): string {
   return `${PROMPT_STUDIO_OVERRIDE_MARKER_PREFIX}${target}`
 }
 
+function systemSectionName(id: string): string {
+  return `${SYSTEM_SECTION_PREFIX}${id}`
+}
+
 function cloneComponent(component: PromptComponent): PromptComponent {
   return { ...component }
 }
@@ -94,6 +101,7 @@ function cloneComponent(component: PromptComponent): PromptComponent {
 class RuntimeBindings {
   readonly ownedSectionNames = new Set<string>()
   readonly overridesByMarker = new Map<string, NativeOverride>()
+  readonly systemBySection = new Map<string, PromptComponent>()
   readonly supplements = new Map<string, PromptComponent>()
 
   /** Activate one component and return its composed inverse. */
@@ -105,21 +113,44 @@ class RuntimeBindings {
       return ctx.effect(function* (this: RuntimeBindings) {
         this.ownedSectionNames.add(marker)
         this.overridesByMarker.set(marker, snapshot)
-        if (snapshot.enabled) this.supplements.set(snapshot.id, snapshot)
+        if (snapshot.enabled && snapshot.role === 'system') {
+          this.systemBySection.set(marker, snapshot)
+        } else if (snapshot.enabled) {
+          this.supplements.set(snapshot.id, snapshot)
+        }
         yield () => {
           this.supplements.delete(snapshot.id)
+          this.systemBySection.delete(marker)
           this.overridesByMarker.delete(marker)
           this.ownedSectionNames.delete(marker)
         }
         yield ctx.systemPrompt.section({
           name: marker,
           order: snapshot.order,
-          text: '',
+          text: snapshot.enabled && snapshot.role === 'system'
+            ? renderSupplementBoundary(snapshot.id, snapshot.template)
+            : '',
         })
       }.bind(this), `prompt-studio: override ${snapshot.origin}`)
     }
     if (!component.enabled) return ctx.effect(() => () => undefined, `prompt-studio: disabled ${component.id}`)
     const snapshot = cloneComponent(component)
+    if (snapshot.role === 'system') {
+      const sectionName = systemSectionName(snapshot.id)
+      return ctx.effect(function* (this: RuntimeBindings) {
+        this.ownedSectionNames.add(sectionName)
+        this.systemBySection.set(sectionName, snapshot)
+        yield () => {
+          this.systemBySection.delete(sectionName)
+          this.ownedSectionNames.delete(sectionName)
+        }
+        yield ctx.systemPrompt.section({
+          name: sectionName,
+          order: snapshot.order,
+          text: renderSupplementBoundary(snapshot.id, snapshot.template),
+        })
+      }.bind(this), `prompt-studio: system supplement ${component.id}`)
+    }
     return ctx.effect(function* (this: RuntimeBindings) {
       this.supplements.set(snapshot.id, snapshot)
       yield () => { this.supplements.delete(snapshot.id) }
@@ -153,15 +184,21 @@ function applyOverrides(
   const matchedOverrideIds = new Set<string>()
   if (overridesByMarker.size === 0) return matchedOverrideIds
   const presentNames = new Set(assembly.sections.map(section => section.name))
+  const matchedMarkers = new Set<string>()
   const replacedTargets = new Set<string>()
   for (const [marker, override] of overridesByMarker) {
     if (!presentNames.has(marker) || !presentNames.has(override.origin)) continue
+    matchedMarkers.add(marker)
     replacedTargets.add(override.origin)
     matchedOverrideIds.add(override.id)
   }
   assembly.sections = assembly.sections.flatMap((section) => {
     const override = overridesByMarker.get(section.name)
-    if (override !== undefined) return []
+    if (override !== undefined) {
+      return matchedMarkers.has(section.name) && override.enabled && override.role === 'system'
+        ? [section]
+        : []
+    }
     return replacedTargets.has(section.name) ? [] : [section]
   })
   return matchedOverrideIds
@@ -176,7 +213,6 @@ function runtimeNative(
     .map((section, order) => ({
       id: section.name,
       kind: 'native',
-      position: 'after_system',
       role: 'system',
       order,
       enabled: true,
@@ -186,16 +222,24 @@ function runtimeNative(
 
 function effectiveAssembly(
   sections: readonly AssembledSection[],
+  systemBySection: ReadonlyMap<string, PromptComponent>,
 ): PromptComponent[] {
-  return sections.map((section, order) => ({
-    id: section.name,
-    kind: 'native',
-    position: 'after_system',
-    role: 'system',
-    order,
-    enabled: true,
-    template: section.text,
-  }))
+  return sections.map((section, order) => {
+    const supplement = systemBySection.get(section.name)
+    if (supplement !== undefined) {
+      const snapshot = { ...supplement, template: section.text }
+      delete snapshot.position
+      return snapshot
+    }
+    return {
+      id: section.name,
+      kind: 'native',
+      role: 'system',
+      order,
+      enabled: true,
+      template: section.text,
+    }
+  })
 }
 
 /** Latest value-level snapshot of the runtime registry. */
@@ -261,8 +305,8 @@ function renderComponentTemplate(component: PromptComponent, agent: Agent): stri
 
 interface PlannedSupplement {
   id: string
-  position: PromptComponent['position']
-  role: PromptComponent['role']
+  position: NonNullable<PromptComponent['position']>
+  role: Exclude<PromptComponent['role'], 'system'>
   order: number
   text: string
   declaration: number
@@ -274,14 +318,17 @@ class SupplementPlans {
 
   prepare(agent: Agent | undefined, components: readonly PromptComponent[]): void {
     if (agent === undefined) return
-    const plan = components.map((component, declaration): PlannedSupplement => ({
-      id: component.id,
-      position: component.position,
-      role: component.role,
-      order: component.order,
-      text: renderComponentTemplate(component, agent),
-      declaration,
-    })).sort((left, right) => left.order - right.order || left.declaration - right.declaration)
+    const plan = components.flatMap((component, declaration): PlannedSupplement[] => {
+      if (component.role === 'system' || component.position === undefined) return []
+      return [{
+        id: component.id,
+        position: component.position,
+        role: component.role,
+        order: component.order,
+        text: renderComponentTemplate(component, agent),
+        declaration,
+      }]
+    })
     if (plan.length === 0) {
       this.bySession.delete(String(agent.session.id))
       return
@@ -304,18 +351,103 @@ function supplementalMessage(supplement: PlannedSupplement): Message {
   return Object.freeze({
     id: crypto.randomUUID(),
     role: supplement.role,
-    content: Object.freeze([Object.freeze({ type: 'text' as const, text: supplement.text })]),
+    content: Object.freeze([Object.freeze({
+      type: 'text' as const,
+      text: renderSupplementBoundary(supplement.id, supplement.text),
+    })]),
     source: Object.freeze({ kind: 'plugin' as const, plugin: REQUEST_SOURCE }),
   }) as Message
+}
+
+function supplementsAt(
+  plan: readonly PlannedSupplement[],
+  position: PlannedSupplement['position'],
+): PlannedSupplement[] {
+  return plan
+    .filter(item => item.position === position)
+    .sort((left, right) => left.order - right.order || left.declaration - right.declaration)
+}
+
+function mergeSupplementAfter(message: Message, supplement: PlannedSupplement): Message {
+  const boundary = renderSupplementBoundary(supplement.id, supplement.text)
+  return Object.freeze({
+    ...message,
+    content: Object.freeze([
+      ...message.content,
+      Object.freeze({ type: 'text' as const, text: `\n\n${boundary}` }),
+    ]),
+  }) as Message
+}
+
+function supplementalGroups(plan: readonly PlannedSupplement[]): Message[] {
+  const groups: Message[] = []
+  for (const supplement of plan) {
+    const previous = groups.at(-1)
+    if (previous?.role === supplement.role) {
+      groups[groups.length - 1] = mergeSupplementAfter(previous, supplement)
+    } else {
+      groups.push(supplementalMessage(supplement))
+    }
+  }
+  return groups
+}
+
+function groupText(message: Message): string {
+  return message.content
+    .filter(block => block.type === 'text')
+    .map(block => block.text)
+    .join('')
+}
+
+function mergeGroup(
+  native: Message,
+  group: Message,
+  placement: 'before' | 'after',
+): Message {
+  const text = groupText(group)
+  const boundaryBlock = Object.freeze({
+    type: 'text' as const,
+    text: placement === 'before' ? `${text}\n\n` : `\n\n${text}`,
+  })
+  const content = placement === 'before'
+    ? [boundaryBlock, ...native.content]
+    : [...native.content, boundaryBlock]
+  return Object.freeze({
+    ...native,
+    content: Object.freeze(content),
+  }) as Message
+}
+
+function insertGap(
+  leftMessages: readonly Message[],
+  rightMessages: readonly Message[],
+  supplements: readonly PlannedSupplement[],
+): Message[] {
+  const left = [...leftMessages]
+  const right = [...rightMessages]
+  const groups = supplementalGroups(supplements)
+  const leftNeighbor = left.at(-1)
+  const firstGroup = groups[0]
+  if (leftNeighbor !== undefined && firstGroup?.role === leftNeighbor.role) {
+    left[left.length - 1] = mergeGroup(leftNeighbor, firstGroup, 'after')
+    groups.shift()
+  }
+  const rightNeighbor = right[0]
+  const lastGroup = groups.at(-1)
+  if (rightNeighbor !== undefined && lastGroup?.role === rightNeighbor.role) {
+    right[0] = mergeGroup(rightNeighbor, lastGroup, 'before')
+    groups.pop()
+  }
+  return [...left, ...groups, ...right]
 }
 
 function insertSupplements(
   nativeMessages: readonly Message[],
   plan: readonly PlannedSupplement[],
 ): Message[] {
-  const afterSystem = plan.filter(item => item.position === 'after_system').map(supplementalMessage)
-  const anchored = plan.filter(item => item.position === 'anchored').map(supplementalMessage)
-  const tail = plan.filter(item => item.position === 'tail').map(supplementalMessage)
+  const afterSystem = supplementsAt(plan, 'after_system')
+  const anchored = supplementsAt(plan, 'anchored')
+  const tail = supplementsAt(plan, 'tail')
   let anchor = -1
   for (let index = nativeMessages.length - 1; index >= 0; index -= 1) {
     const message = nativeMessages[index]
@@ -324,14 +456,15 @@ function insertSupplements(
       break
     }
   }
-  const result = [...afterSystem]
-  for (let index = 0; index < nativeMessages.length; index += 1) {
-    const message = nativeMessages[index]
-    if (message !== undefined) result.push(message)
-    if (index === anchor) result.push(...anchored)
-  }
-  result.push(...tail)
-  return result
+  const anchoredMessages = anchor < 0
+    ? [...nativeMessages]
+    : insertGap(
+        nativeMessages.slice(0, anchor + 1),
+        nativeMessages.slice(anchor + 1),
+        anchored,
+      )
+  const withAfterSystem = insertGap([], anchoredMessages, afterSystem)
+  return insertGap(withAfterSystem, [], tail)
 }
 
 function rewriteRequest(
@@ -399,9 +532,10 @@ export async function apply(ctx: Context): Promise<void> {
     const native = runtimeNative(assembly.sections, bindings.ownedSectionNames)
     const matchedOverrideIds = applyOverrides(assembly, bindings.overridesByMarker)
     const resolved = await next()
-    catalog.commit(native, effectiveAssembly(resolved.sections))
+    catalog.commit(native, effectiveAssembly(resolved.sections, bindings.systemBySection))
     plans.prepare(context.agent, [...bindings.supplements.values()].filter(component => (
-      !isNativeOverride(component) || matchedOverrideIds.has(component.id)
+      component.role !== 'system'
+      && (!isNativeOverride(component) || matchedOverrideIds.has(component.id))
     )))
     return resolved
   }, { prepend: true })

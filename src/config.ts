@@ -34,7 +34,7 @@ const componentSchema: z<PromptComponent> = z.object({
   id: z.string().min(1),
   kind: kindSchema,
   role: roleSchema,
-  position: positionSchema,
+  position: positionSchema.default(undefined as unknown as PromptComponentPosition),
   order: finiteOrder,
   enabled: z.boolean().default(true),
   template: z.string(),
@@ -42,8 +42,15 @@ const componentSchema: z<PromptComponent> = z.object({
 })
 
 const uniqueComponents = z.transform(z.array(componentSchema), (components) => {
-  validatePromptComponents(components)
-  return components
+  const normalized = components.map((component) => {
+    if (component.role !== 'system') return component
+    if (component.position !== undefined && component.position !== 'after_system') return component
+    const snapshot = { ...component }
+    delete snapshot.position
+    return snapshot
+  })
+  validatePromptComponents(normalized)
+  return normalized
 }, true)
 
 /** Persisted settings schema. Only user-authored supplements are stored. */

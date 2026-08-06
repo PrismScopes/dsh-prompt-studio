@@ -16,7 +16,7 @@ export const PROMPT_STUDIO_OVERRIDE_MARKER_PREFIX = 'prompt-studio:override-mark
 /** Runtime provenance is the only component-kind distinction. */
 export type PromptComponentKind = 'native' | 'supplement'
 
-/** Model-facing placement of one component. */
+/** Message-gap placement used only by user/assistant components. */
 export type PromptComponentPosition = 'after_system' | 'anchored' | 'tail'
 
 /** Model-facing role of one component. */
@@ -27,7 +27,9 @@ export interface PromptComponent {
   id: string
   kind: PromptComponentKind
   role: PromptComponentRole
-  position: PromptComponentPosition
+  /** Absent for system components; required for user/assistant components. */
+  position?: PromptComponentPosition
+  /** System-section layer or, for messages, order within the selected gap. */
   order: number
   enabled: boolean
   template: string
@@ -79,10 +81,14 @@ export function validatePromptComponents(
   for (const component of components) {
     validateIdentifier(component.id, 'prompt component ids')
     if (!KINDS.has(component.kind)) throw new TypeError(`prompt component "${component.id}" has an invalid kind`)
-    if (!POSITIONS.has(component.position)) {
-      throw new TypeError(`prompt component "${component.id}" has an invalid position`)
-    }
     if (!ROLES.has(component.role)) throw new TypeError(`prompt component "${component.id}" has an invalid role`)
+    if (component.role === 'system') {
+      if (component.position !== undefined) {
+        throw new TypeError(`system prompt component "${component.id}" cannot define a message position`)
+      }
+    } else if (component.position === undefined || !POSITIONS.has(component.position)) {
+      throw new TypeError(`message prompt component "${component.id}" has an invalid position`)
+    }
     if (!Number.isFinite(component.order)) {
       throw new TypeError(`prompt component "${component.id}" order must be a finite number`)
     }
@@ -97,8 +103,8 @@ export function validatePromptComponents(
       if (component.origin !== undefined) {
         throw new TypeError(`native prompt component "${component.id}" cannot override another component`)
       }
-      if (component.position !== 'after_system' || component.role !== 'system') {
-        throw new TypeError(`native prompt component "${component.id}" must use the system role and system position`)
+      if (component.role !== 'system') {
+        throw new TypeError(`native prompt component "${component.id}" must use the system role`)
       }
       continue
     }
@@ -125,21 +131,63 @@ function uniqueComponentId(preferred: string, used: Set<string>): string {
   }
 }
 
-/** Resolve native override targets for a draft system-slot preview. */
+function escapeAttribute(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('"', '&quot;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+}
+
+/** Wrap one supplement so its authorship remains visible inside merged content. */
+export function renderSupplementBoundary(id: string, text: string): string {
+  return `<supplement id="${escapeAttribute(id)}">\n${text}\n</supplement>`
+}
+
+interface OrderedSystemComponent {
+  component: PromptComponent
+  declaration: number
+}
+
+function systemPreviewComponent(component: PromptComponent): PromptComponent {
+  const snapshot = {
+    ...component,
+    template: renderSupplementBoundary(component.id, component.template),
+  }
+  delete snapshot.position
+  return snapshot
+}
+
+/** Resolve overrides and supplements for a draft of the single system slot. */
 export function buildDraftSystemComponents(
   native: readonly PromptComponent[],
   configured: readonly PromptComponent[],
 ): PromptComponent[] {
   validatePromptComponents(native, true)
   validatePromptComponents(configured)
+  const nativeIds = new Set(native.map(component => component.id))
   const overrides = new Map(configured
     .filter(isNativeOverride)
     .map(component => [component.origin, component]))
-  return native.flatMap((component): PromptComponent[] => {
+  const ordered: OrderedSystemComponent[] = native.flatMap((component, declaration): OrderedSystemComponent[] => {
     const override = overrides.get(component.id)
-    if (override === undefined) return component.enabled ? [{ ...component }] : []
+    if (override === undefined) {
+      return component.enabled ? [{ component: { ...component }, declaration }] : []
+    }
     return []
-  }).sort((left, right) => left.order - right.order)
+  })
+  for (const [declaration, component] of configured.entries()) {
+    if (!component.enabled || component.role !== 'system') continue
+    if (component.origin !== undefined && !nativeIds.has(component.origin)) continue
+    ordered.push({
+      component: systemPreviewComponent(component),
+      declaration: native.length + declaration,
+    })
+  }
+  return ordered
+    .sort((left, right) => left.component.order - right.component.order
+      || left.declaration - right.declaration)
+    .map(entry => entry.component)
 }
 
 /** Concatenate enabled system components using the Host renderer's blank-line rule. */

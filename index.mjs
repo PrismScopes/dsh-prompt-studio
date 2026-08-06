@@ -830,8 +830,10 @@ function validatePromptComponents(components, allowNative = false) {
 	for (const component of components) {
 		validateIdentifier(component.id, "prompt component ids");
 		if (!KINDS.has(component.kind)) throw new TypeError(`prompt component "${component.id}" has an invalid kind`);
-		if (!POSITIONS.has(component.position)) throw new TypeError(`prompt component "${component.id}" has an invalid position`);
 		if (!ROLES.has(component.role)) throw new TypeError(`prompt component "${component.id}" has an invalid role`);
+		if (component.role === "system") {
+			if (component.position !== void 0) throw new TypeError(`system prompt component "${component.id}" cannot define a message position`);
+		} else if (component.position === void 0 || !POSITIONS.has(component.position)) throw new TypeError(`message prompt component "${component.id}" has an invalid position`);
 		if (!Number.isFinite(component.order)) throw new TypeError(`prompt component "${component.id}" order must be a finite number`);
 		if (component.id.startsWith("prompt-studio:override-marker:")) throw new TypeError(`prompt component ids beginning with "${PROMPT_STUDIO_OVERRIDE_MARKER_PREFIX}" are reserved`);
 		if (ids.has(component.id)) throw new TypeError(`prompt component "${component.id}" is listed more than once`);
@@ -839,7 +841,7 @@ function validatePromptComponents(components, allowNative = false) {
 		if (component.kind === "native") {
 			if (!allowNative) throw new TypeError(`native prompt component "${component.id}" cannot be persisted`);
 			if (component.origin !== void 0) throw new TypeError(`native prompt component "${component.id}" cannot override another component`);
-			if (component.position !== "after_system" || component.role !== "system") throw new TypeError(`native prompt component "${component.id}" must use the system role and system position`);
+			if (component.role !== "system") throw new TypeError(`native prompt component "${component.id}" must use the system role`);
 			continue;
 		}
 		if (component.origin === void 0) continue;
@@ -860,15 +862,43 @@ function uniqueComponentId(preferred, used) {
 		return candidate;
 	}
 }
-/** Resolve native override targets for a draft system-slot preview. */
+function escapeAttribute(value) {
+	return value.replaceAll("&", "&amp;").replaceAll("\"", "&quot;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+/** Wrap one supplement so its authorship remains visible inside merged content. */
+function renderSupplementBoundary(id, text) {
+	return `<supplement id="${escapeAttribute(id)}">\n${text}\n</supplement>`;
+}
+function systemPreviewComponent(component) {
+	const snapshot = {
+		...component,
+		template: renderSupplementBoundary(component.id, component.template)
+	};
+	delete snapshot.position;
+	return snapshot;
+}
+/** Resolve overrides and supplements for a draft of the single system slot. */
 function buildDraftSystemComponents(native, configured) {
 	validatePromptComponents(native, true);
 	validatePromptComponents(configured);
+	const nativeIds = new Set(native.map((component) => component.id));
 	const overrides = new Map(configured.filter(isNativeOverride).map((component) => [component.origin, component]));
-	return native.flatMap((component) => {
-		if (overrides.get(component.id) === void 0) return component.enabled ? [{ ...component }] : [];
+	const ordered = native.flatMap((component, declaration) => {
+		if (overrides.get(component.id) === void 0) return component.enabled ? [{
+			component: { ...component },
+			declaration
+		}] : [];
 		return [];
-	}).sort((left, right) => left.order - right.order);
+	});
+	for (const [declaration, component] of configured.entries()) {
+		if (!component.enabled || component.role !== "system") continue;
+		if (component.origin !== void 0 && !nativeIds.has(component.origin)) continue;
+		ordered.push({
+			component: systemPreviewComponent(component),
+			declaration: native.length + declaration
+		});
+	}
+	return ordered.sort((left, right) => left.component.order - right.component.order || left.declaration - right.declaration).map((entry) => entry.component);
 }
 /** Concatenate enabled system components using the Host renderer's blank-line rule. */
 function renderSystemPreview(components) {
@@ -904,15 +934,22 @@ const componentSchema = Schema.object({
 	id: Schema.string().min(1),
 	kind: kindSchema,
 	role: roleSchema,
-	position: positionSchema,
+	position: positionSchema.default(void 0),
 	order: finiteOrder,
 	enabled: Schema.boolean().default(true),
 	template: Schema.string(),
 	origin: Schema.string().min(1).default(void 0)
 });
 const uniqueComponents = Schema.transform(Schema.array(componentSchema), (components) => {
-	validatePromptComponents(components);
-	return components;
+	const normalized = components.map((component) => {
+		if (component.role !== "system") return component;
+		if (component.position !== void 0 && component.position !== "after_system") return component;
+		const snapshot = { ...component };
+		delete snapshot.position;
+		return snapshot;
+	});
+	validatePromptComponents(normalized);
+	return normalized;
 }, true);
 /** Persisted settings schema. Only user-authored supplements are stored. */
 const studioConfigSchema = Schema.object({ components: uniqueComponents.default([]) });
@@ -929,8 +966,12 @@ const inject = [
 	"llm"
 ];
 const REQUEST_SOURCE = "moeblack/prompt-studio";
+const SYSTEM_SECTION_PREFIX = "prompt-studio:supplement-section:";
 function markerName(target) {
 	return `${PROMPT_STUDIO_OVERRIDE_MARKER_PREFIX}${target}`;
+}
+function systemSectionName(id) {
+	return `${SYSTEM_SECTION_PREFIX}${id}`;
 }
 function cloneComponent(component) {
 	return { ...component };
@@ -939,6 +980,7 @@ function cloneComponent(component) {
 var RuntimeBindings = class {
 	ownedSectionNames = /* @__PURE__ */ new Set();
 	overridesByMarker = /* @__PURE__ */ new Map();
+	systemBySection = /* @__PURE__ */ new Map();
 	supplements = /* @__PURE__ */ new Map();
 	/** Activate one component and return its composed inverse. */
 	activate(ctx, component) {
@@ -952,21 +994,39 @@ var RuntimeBindings = class {
 			return ctx.effect(function* () {
 				this.ownedSectionNames.add(marker);
 				this.overridesByMarker.set(marker, snapshot);
-				if (snapshot.enabled) this.supplements.set(snapshot.id, snapshot);
+				if (snapshot.enabled && snapshot.role === "system") this.systemBySection.set(marker, snapshot);
+				else if (snapshot.enabled) this.supplements.set(snapshot.id, snapshot);
 				yield () => {
 					this.supplements.delete(snapshot.id);
+					this.systemBySection.delete(marker);
 					this.overridesByMarker.delete(marker);
 					this.ownedSectionNames.delete(marker);
 				};
 				yield ctx.systemPrompt.section({
 					name: marker,
 					order: snapshot.order,
-					text: ""
+					text: snapshot.enabled && snapshot.role === "system" ? renderSupplementBoundary(snapshot.id, snapshot.template) : ""
 				});
 			}.bind(this), `prompt-studio: override ${snapshot.origin}`);
 		}
 		if (!component.enabled) return ctx.effect(() => () => void 0, `prompt-studio: disabled ${component.id}`);
 		const snapshot = cloneComponent(component);
+		if (snapshot.role === "system") {
+			const sectionName = systemSectionName(snapshot.id);
+			return ctx.effect(function* () {
+				this.ownedSectionNames.add(sectionName);
+				this.systemBySection.set(sectionName, snapshot);
+				yield () => {
+					this.systemBySection.delete(sectionName);
+					this.ownedSectionNames.delete(sectionName);
+				};
+				yield ctx.systemPrompt.section({
+					name: sectionName,
+					order: snapshot.order,
+					text: renderSupplementBoundary(snapshot.id, snapshot.template)
+				});
+			}.bind(this), `prompt-studio: system supplement ${component.id}`);
+		}
 		return ctx.effect(function* () {
 			this.supplements.set(snapshot.id, snapshot);
 			yield () => {
@@ -997,14 +1057,17 @@ function applyOverrides(assembly, overridesByMarker) {
 	const matchedOverrideIds = /* @__PURE__ */ new Set();
 	if (overridesByMarker.size === 0) return matchedOverrideIds;
 	const presentNames = new Set(assembly.sections.map((section) => section.name));
+	const matchedMarkers = /* @__PURE__ */ new Set();
 	const replacedTargets = /* @__PURE__ */ new Set();
 	for (const [marker, override] of overridesByMarker) {
 		if (!presentNames.has(marker) || !presentNames.has(override.origin)) continue;
+		matchedMarkers.add(marker);
 		replacedTargets.add(override.origin);
 		matchedOverrideIds.add(override.id);
 	}
 	assembly.sections = assembly.sections.flatMap((section) => {
-		if (overridesByMarker.get(section.name) !== void 0) return [];
+		const override = overridesByMarker.get(section.name);
+		if (override !== void 0) return matchedMarkers.has(section.name) && override.enabled && override.role === "system" ? [section] : [];
 		return replacedTargets.has(section.name) ? [] : [section];
 	});
 	return matchedOverrideIds;
@@ -1013,23 +1076,32 @@ function runtimeNative(sections, ownedSectionNames) {
 	return sections.filter((section) => !ownedSectionNames.has(section.name)).map((section, order) => ({
 		id: section.name,
 		kind: "native",
-		position: "after_system",
 		role: "system",
 		order,
 		enabled: true,
 		template: section.text
 	}));
 }
-function effectiveAssembly(sections) {
-	return sections.map((section, order) => ({
-		id: section.name,
-		kind: "native",
-		position: "after_system",
-		role: "system",
-		order,
-		enabled: true,
-		template: section.text
-	}));
+function effectiveAssembly(sections, systemBySection) {
+	return sections.map((section, order) => {
+		const supplement = systemBySection.get(section.name);
+		if (supplement !== void 0) {
+			const snapshot = {
+				...supplement,
+				template: section.text
+			};
+			delete snapshot.position;
+			return snapshot;
+		}
+		return {
+			id: section.name,
+			kind: "native",
+			role: "system",
+			order,
+			enabled: true,
+			template: section.text
+		};
+	});
 }
 /** Latest value-level snapshot of the runtime registry. */
 var RuntimeCatalogStore = class {
@@ -1080,14 +1152,17 @@ var SupplementPlans = class {
 	bySession = /* @__PURE__ */ new Map();
 	prepare(agent, components) {
 		if (agent === void 0) return;
-		const plan = components.map((component, declaration) => ({
-			id: component.id,
-			position: component.position,
-			role: component.role,
-			order: component.order,
-			text: renderComponentTemplate(component, agent),
-			declaration
-		})).sort((left, right) => left.order - right.order || left.declaration - right.declaration);
+		const plan = components.flatMap((component, declaration) => {
+			if (component.role === "system" || component.position === void 0) return [];
+			return [{
+				id: component.id,
+				position: component.position,
+				role: component.role,
+				order: component.order,
+				text: renderComponentTemplate(component, agent),
+				declaration
+			}];
+		});
 		if (plan.length === 0) {
 			this.bySession.delete(String(agent.session.id));
 			return;
@@ -1109,7 +1184,7 @@ function supplementalMessage(supplement) {
 		role: supplement.role,
 		content: Object.freeze([Object.freeze({
 			type: "text",
-			text: supplement.text
+			text: renderSupplementBoundary(supplement.id, supplement.text)
 		})]),
 		source: Object.freeze({
 			kind: "plugin",
@@ -1117,10 +1192,69 @@ function supplementalMessage(supplement) {
 		})
 	});
 }
+function supplementsAt(plan, position) {
+	return plan.filter((item) => item.position === position).sort((left, right) => left.order - right.order || left.declaration - right.declaration);
+}
+function mergeSupplementAfter(message, supplement) {
+	const boundary = renderSupplementBoundary(supplement.id, supplement.text);
+	return Object.freeze({
+		...message,
+		content: Object.freeze([...message.content, Object.freeze({
+			type: "text",
+			text: `\n\n${boundary}`
+		})])
+	});
+}
+function supplementalGroups(plan) {
+	const groups = [];
+	for (const supplement of plan) {
+		const previous = groups.at(-1);
+		if (previous?.role === supplement.role) groups[groups.length - 1] = mergeSupplementAfter(previous, supplement);
+		else groups.push(supplementalMessage(supplement));
+	}
+	return groups;
+}
+function groupText(message) {
+	return message.content.filter((block) => block.type === "text").map((block) => block.text).join("");
+}
+function mergeGroup(native, group, placement) {
+	const text = groupText(group);
+	const boundaryBlock = Object.freeze({
+		type: "text",
+		text: placement === "before" ? `${text}\n\n` : `\n\n${text}`
+	});
+	const content = placement === "before" ? [boundaryBlock, ...native.content] : [...native.content, boundaryBlock];
+	return Object.freeze({
+		...native,
+		content: Object.freeze(content)
+	});
+}
+function insertGap(leftMessages, rightMessages, supplements) {
+	const left = [...leftMessages];
+	const right = [...rightMessages];
+	const groups = supplementalGroups(supplements);
+	const leftNeighbor = left.at(-1);
+	const firstGroup = groups[0];
+	if (leftNeighbor !== void 0 && firstGroup?.role === leftNeighbor.role) {
+		left[left.length - 1] = mergeGroup(leftNeighbor, firstGroup, "after");
+		groups.shift();
+	}
+	const rightNeighbor = right[0];
+	const lastGroup = groups.at(-1);
+	if (rightNeighbor !== void 0 && lastGroup?.role === rightNeighbor.role) {
+		right[0] = mergeGroup(rightNeighbor, lastGroup, "before");
+		groups.pop();
+	}
+	return [
+		...left,
+		...groups,
+		...right
+	];
+}
 function insertSupplements(nativeMessages, plan) {
-	const afterSystem = plan.filter((item) => item.position === "after_system").map(supplementalMessage);
-	const anchored = plan.filter((item) => item.position === "anchored").map(supplementalMessage);
-	const tail = plan.filter((item) => item.position === "tail").map(supplementalMessage);
+	const afterSystem = supplementsAt(plan, "after_system");
+	const anchored = supplementsAt(plan, "anchored");
+	const tail = supplementsAt(plan, "tail");
 	let anchor = -1;
 	for (let index = nativeMessages.length - 1; index >= 0; index -= 1) {
 		const message = nativeMessages[index];
@@ -1129,14 +1263,7 @@ function insertSupplements(nativeMessages, plan) {
 			break;
 		}
 	}
-	const result = [...afterSystem];
-	for (let index = 0; index < nativeMessages.length; index += 1) {
-		const message = nativeMessages[index];
-		if (message !== void 0) result.push(message);
-		if (index === anchor) result.push(...anchored);
-	}
-	result.push(...tail);
-	return result;
+	return insertGap(insertGap([], anchor < 0 ? [...nativeMessages] : insertGap(nativeMessages.slice(0, anchor + 1), nativeMessages.slice(anchor + 1), anchored), afterSystem), [], tail);
 }
 function rewriteRequest(ctx, plans, options, next) {
 	if (!(options.sessionId !== void 0 && options.purpose === void 0 && Object.isFrozen(options) && Object.isFrozen(options.messages)) || options.sessionId === void 0) return next();
@@ -1183,8 +1310,8 @@ async function apply(ctx) {
 		const native = runtimeNative(assembly.sections, bindings.ownedSectionNames);
 		const matchedOverrideIds = applyOverrides(assembly, bindings.overridesByMarker);
 		const resolved = await next();
-		catalog.commit(native, effectiveAssembly(resolved.sections));
-		plans.prepare(context.agent, [...bindings.supplements.values()].filter((component) => !isNativeOverride(component) || matchedOverrideIds.has(component.id)));
+		catalog.commit(native, effectiveAssembly(resolved.sections, bindings.systemBySection));
+		plans.prepare(context.agent, [...bindings.supplements.values()].filter((component) => component.role !== "system" && (!isNativeOverride(component) || matchedOverrideIds.has(component.id))));
 		return resolved;
 	}, { prepend: true });
 	let refreshRequested = false;
@@ -1221,4 +1348,4 @@ async function apply(ctx) {
 	await ctx.systemPrompt.assemble();
 }
 //#endregion
-export { DEFAULT_SUPPLEMENT_ORDER, PROMPT_STUDIO_NAMESPACE, PROMPT_STUDIO_SETTINGS_NAMESPACE, PROMPT_STUDIO_STATE_PATH, PROMPT_STUDIO_VIEW_ORDER, apply, buildDraftSystemComponents, inject, isNativeOverride, name, nextOverrideId, nextSupplementId, renderSystemPreview, studioConfigSchema, validatePromptComponents };
+export { DEFAULT_SUPPLEMENT_ORDER, PROMPT_STUDIO_NAMESPACE, PROMPT_STUDIO_SETTINGS_NAMESPACE, PROMPT_STUDIO_STATE_PATH, PROMPT_STUDIO_VIEW_ORDER, apply, buildDraftSystemComponents, inject, isNativeOverride, name, nextOverrideId, nextSupplementId, renderSupplementBoundary, renderSystemPreview, studioConfigSchema, validatePromptComponents };

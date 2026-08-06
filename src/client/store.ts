@@ -54,8 +54,10 @@ function decodeComponents(value: unknown, label: string, allowNative: boolean): 
     if (
       typeof candidate['id'] !== 'string'
       || typeof kind !== 'string' || !KINDS.has(kind as PromptComponentKind)
-      || typeof position !== 'string' || !POSITIONS.has(position as PromptComponentPosition)
       || typeof role !== 'string' || !ROLES.has(role as PromptComponentRole)
+      || (role === 'system'
+        ? position !== undefined && position !== 'after_system'
+        : typeof position !== 'string' || !POSITIONS.has(position as PromptComponentPosition))
       || typeof candidate['order'] !== 'number'
       || typeof candidate['enabled'] !== 'boolean'
       || typeof candidate['template'] !== 'string'
@@ -63,16 +65,17 @@ function decodeComponents(value: unknown, label: string, allowNative: boolean): 
     ) {
       throw new TypeError(`prompt-studio ${label} row ${String(index + 1)} has an invalid shape`)
     }
-    return {
+    const component: PromptComponent = {
       id: candidate['id'],
       kind: kind as PromptComponentKind,
-      position: position as PromptComponentPosition,
       role: role as PromptComponentRole,
       order: candidate['order'],
       enabled: candidate['enabled'],
       template: candidate['template'],
       ...candidate['origin'] === undefined ? {} : { origin: candidate['origin'] as string },
     }
+    if (component.role !== 'system') component.position = position as PromptComponentPosition
+    return component
   })
   validatePromptComponents(components, allowNative)
   return components

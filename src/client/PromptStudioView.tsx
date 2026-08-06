@@ -9,6 +9,7 @@ import {
   isNativeOverride,
   nextOverrideId,
   nextSupplementId,
+  renderSupplementBoundary,
   renderSystemPreview,
   type PromptComponent,
   type PromptComponentKind,
@@ -64,21 +65,26 @@ function messageOf(error: unknown): string {
 }
 
 function compareRows(left: DisplayRow, right: DisplayRow): number {
-  return POSITION_ORDER[left.component.position] - POSITION_ORDER[right.component.position]
+  const leftPlacement = left.component.role === 'system'
+    ? -1
+    : POSITION_ORDER[left.component.position ?? 'tail']
+  const rightPlacement = right.component.role === 'system'
+    ? -1
+    : POSITION_ORDER[right.component.position ?? 'tail']
+  return leftPlacement - rightPlacement
     || left.component.order - right.component.order
 }
 
-function previewText(system: readonly PromptComponent[], supplements: readonly PromptComponent[]): string {
+function previewText(systemText: string, supplements: readonly PromptComponent[]): string {
   const blocks: string[] = []
-  const systemText = renderSystemPreview(system)
-  if (systemText.length > 0) blocks.push(`[system]\n${systemText}`)
+  if (systemText.length > 0) blocks.push(systemText)
   const sortedSupplements = supplements
     .map((component, declaration) => ({ component, declaration }))
-    .sort((left, right) => POSITION_ORDER[left.component.position] - POSITION_ORDER[right.component.position]
+    .sort((left, right) => POSITION_ORDER[left.component.position ?? 'tail'] - POSITION_ORDER[right.component.position ?? 'tail']
       || left.component.order - right.component.order
       || left.declaration - right.declaration)
   for (const { component } of sortedSupplements) {
-    blocks.push(`[${POSITION_LABEL[component.position]} · ${component.role} · ${component.id}]\n${component.template}`)
+    blocks.push(renderSupplementBoundary(component.id, component.template))
   }
   return blocks.join('\n\n')
 }
@@ -139,14 +145,20 @@ function PromptStudioEditor({
   )
   const requestSupplements = useMemo(() => {
     const nativeIds = new Set(remote.native.map(component => component.id))
-    return draft.filter(component => component.enabled && (
-      !isNativeOverride(component)
-      || nativeIds.has(component.origin)
-    ))
+    return draft.filter(component => component.enabled
+      && component.role !== 'system'
+      && (!isNativeOverride(component) || nativeIds.has(component.origin)))
   }, [draft, remote.native])
+  const orderedRequestSupplements = useMemo(() => requestSupplements
+    .map((component, declaration) => ({ component, declaration }))
+    .sort((left, right) => POSITION_ORDER[left.component.position ?? 'tail'] - POSITION_ORDER[right.component.position ?? 'tail']
+      || left.component.order - right.component.order
+      || left.declaration - right.declaration)
+    .map(entry => entry.component), [requestSupplements])
+  const systemContent = useMemo(() => renderSystemPreview(draftSystem), [draftSystem])
   const preview = useMemo(
-    () => previewText(draftSystem, requestSupplements),
-    [draftSystem, requestSupplements],
+    () => previewText(systemContent, orderedRequestSupplements),
+    [orderedRequestSupplements, systemContent],
   )
 
   const changeComponent = (index: number, patch: Partial<PromptComponent>): void => {
@@ -163,6 +175,18 @@ function PromptStudioEditor({
       const next = { ...component }
       if (origin.length === 0) delete next.origin
       else next.origin = origin
+      return next
+    }))
+    setDirty(true)
+    setSaveError(null)
+  }
+
+  const changeRole = (index: number, role: PromptComponentRole): void => {
+    setDraft(current => current.map((component, position) => {
+      if (position !== index) return component
+      const next: PromptComponent = { ...component, role }
+      if (role === 'system') delete next.position
+      else next.position ??= 'after_system'
       return next
     }))
     setDirty(true)
@@ -197,7 +221,6 @@ function PromptStudioEditor({
       const next = [...current, {
         id: nextOverrideId(current, native.id),
         kind: 'supplement' as const,
-        position: 'after_system' as const,
         role: 'system' as const,
         order: native.order,
         enabled: true,
@@ -236,7 +259,7 @@ function PromptStudioEditor({
         <div>
           <h1 className={styles['title']}>Prompt Studio</h1>
           <p className={styles['intro']}>
-            统一编排只读原生组件与可编辑补充组件；角色、位置和原生覆盖目标彼此独立。
+            角色决定内容归宿；system 合并进唯一系统区，user/assistant 再由位置决定消息间隙。
           </p>
         </div>
         <div className={styles['headerActions']}>
@@ -292,9 +315,13 @@ function PromptStudioEditor({
                       )}
                     <span className={styles['kindBadge']}>{KIND_LABEL[component.kind]}</span>
                     <span className={styles['sectionName']}>{component.id}</span>
-                    <span className={styles['positionBadge']}>{POSITION_LABEL[component.position]}</span>
+                    {component.position === undefined
+                      ? null
+                      : <span className={styles['positionBadge']}>{POSITION_LABEL[component.position]}</span>}
                     <span className={styles['roleBadge']}>{component.role}</span>
-                    <span className={styles['orderBadge']}>顺序 {String(component.order)}</span>
+                    <span className={styles['orderBadge']}>
+                      {component.role === 'system' ? '层级' : '间隙内顺序'} {String(component.order)}
+                    </span>
                     {isNative
                       ? (
                         <button
@@ -344,7 +371,9 @@ function PromptStudioEditor({
                           />
                         </label>
                         <label className={styles['field']}>
-                          <span className={styles['fieldLabel']}>顺序</span>
+                          <span className={styles['fieldLabel']}>
+                            {component.role === 'system' ? '系统层级' : '间隙内顺序'}
+                          </span>
                           <input
                             className={styles['orderInput']}
                             type="number"
@@ -353,26 +382,30 @@ function PromptStudioEditor({
                             onChange={(event) => { changeComponent(configuredIndex, { order: Number(event.target.value) }) }}
                           />
                         </label>
-                        <label className={styles['field']}>
-                          <span className={styles['fieldLabel']}>位置</span>
-                          <select
-                            className={styles['select']}
-                            value={component.position}
-                            disabled={!remote.writable}
-                            onChange={(event) => { changeComponent(configuredIndex, { position: event.target.value as PromptComponentPosition }) }}
-                          >
-                            {Object.entries(POSITION_LABEL).map(([value, label]) => (
-                              <option key={value} value={value}>{label}</option>
-                            ))}
-                          </select>
-                        </label>
+                        {component.role === 'system'
+                          ? null
+                          : (
+                            <label className={styles['field']}>
+                              <span className={styles['fieldLabel']}>消息间隙</span>
+                              <select
+                                className={styles['select']}
+                                value={component.position}
+                                disabled={!remote.writable}
+                                onChange={(event) => { changeComponent(configuredIndex, { position: event.target.value as PromptComponentPosition }) }}
+                              >
+                                {Object.entries(POSITION_LABEL).map(([value, label]) => (
+                                  <option key={value} value={value}>{label}</option>
+                                ))}
+                              </select>
+                            </label>
+                          )}
                         <label className={styles['field']}>
                           <span className={styles['fieldLabel']}>角色</span>
                           <select
                             className={styles['select']}
                             value={component.role}
                             disabled={!remote.writable}
-                            onChange={(event) => { changeComponent(configuredIndex, { role: event.target.value as PromptComponentRole }) }}
+                            onChange={(event) => { changeRole(configuredIndex, event.target.value as PromptComponentRole) }}
                           >
                             {Object.entries(ROLE_LABEL).map(([value, label]) => (
                               <option key={value} value={value}>{label}</option>
@@ -415,24 +448,32 @@ function PromptStudioEditor({
             <div>
               <h2 className={styles['subtitle']}>完整预览</h2>
               <p className={styles['caption']}>
-                未解析模板；{'{{user_input}}'}、{'{{model}}'} 与 {'{{cwd}}'} 在每次组装时读取当前会话。
+                下方仅显示模型可见内容，不加入位置、角色或标识标签；模板变量在每次组装时读取当前会话。
               </p>
             </div>
-            <span className={styles['count']}>{String(draftSystem.length + requestSupplements.length)} 项</span>
+            <span className={styles['count']}>
+              {String((systemContent.length > 0 ? 1 : 0) + orderedRequestSupplements.length)} 段
+            </span>
           </div>
           <div className={styles['assemblyOrder']}>
-            {draftSystem.map((component, index) => (
-              <span key={`system:${component.kind}:${component.id}:${String(index)}`} className={styles['assemblyRow']}>
-                <span className={styles['assemblyIndex']}>{String(index + 1)}</span>
-                <span>{component.id}</span>
-                <span className={styles['assemblyOrderValue']}>{KIND_LABEL[component.kind]}</span>
-              </span>
-            ))}
-            {requestSupplements.map(component => (
+            {systemContent.length > 0
+              ? (
+                <span className={styles['assemblyRow']}>
+                  <span className={styles['assemblyIndex']}>1</span>
+                  <span>system</span>
+                  <span className={styles['assemblyOrderValue']}>{String(draftSystem.length)} 个 section 合并</span>
+                </span>
+              )
+              : null}
+            {orderedRequestSupplements.map((component, index) => (
               <span key={`supplement:${component.id}`} className={styles['assemblyRow']}>
-                <span className={styles['assemblyIndex']}>＋</span>
-                <span>{component.id}</span>
-                <span className={styles['assemblyOrderValue']}>{POSITION_LABEL[component.position]} · {component.role}</span>
+                <span className={styles['assemblyIndex']}>
+                  {String(index + (systemContent.length > 0 ? 2 : 1))}
+                </span>
+                <span>{component.role}</span>
+                <span className={styles['assemblyOrderValue']}>
+                  {component.position === undefined ? '' : POSITION_LABEL[component.position]}
+                </span>
               </span>
             ))}
           </div>
