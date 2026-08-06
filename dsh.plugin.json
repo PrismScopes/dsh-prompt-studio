@@ -2,7 +2,7 @@
   "id": "moeblack/prompt-studio",
   "version": "0.1.0",
   "main": "./index.mjs",
-  "description": "Edit user and built-in system-prompt sections with a live assembled-template preview",
+  "description": "Compose runtime prompts, overrides, and request-local synthetic turns in one live editor",
   "engines": {
     "dsh": ">=0.0.1"
   },

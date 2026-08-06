@@ -19,6 +19,12 @@
       "path": "./.dsh/packages/core/system-prompt"
     },
     {
+      "path": "./.dsh/packages/core/agent"
+    },
+    {
+      "path": "./.dsh/packages/llm/llm"
+    },
+    {
       "path": "./.dsh/packages/settings/settings"
     },
     {

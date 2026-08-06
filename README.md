@@ -1,21 +1,88 @@
 # moeblack/prompt-studio
 
-Prompt Studio 的插件分发形态。插件在对话页注册 **Prompt Studio** 标签页，用于增删、启停、排序和编辑用户自定义的 system prompt 内容块，也可覆盖、关闭或恢复内置内容块，并实时预览按最终顺序拼接的完整模板。
+Prompt Studio 的插件分发形态。插件在对话页注册 **Prompt Studio** 标签页，以同一组件列表展示运行时原生提示词和用户补充，并提供编辑、原生覆盖与完整请求预览。
 
-服务端持有 `prompt-studio` 配置段：用户内容块通过 `ctx.systemPrompt.section(...)` 增量注册；内置内容块的覆盖通过带顺序的标记块进入注册表，再在 `system-prompt/assemble` 组装流水线中替换或移除原内容块。浏览器端通过配置接口携带版本号保存 `sections` 与 `overrides`，数据由宿主的 `settings.yaml` 持久化。
+## 组件模型
 
-## 文件
+每个编排项使用同一结构：
 
-| 文件 | 作用 |
-|---|---|
-| `dsh.plugin.json` | 插件清单：插件身份、兼容范围、服务端/浏览器端入口 |
-| `index.mjs` | 服务端构建产物：配置段、用户内容块绑定、内置覆盖流水线 |
-| `client.js` | 浏览器端构建产物；以 `moeblack/prompt-studio` 登记到 `window.__ModuleLoader__` |
-| `client.js.map` | 浏览器端构建源码映射 |
-| `src/` | 服务端、浏览器端、共享类型与内置内容块清单源码 |
-| `tsdown.config.ts` | 使用 DSH 官方 `clientBundle` 预设的双端构建配置 |
-| `scripts/` | DSH 源码树定位、构建与测试脚本 |
-| `tests/` | 服务端、数据、界面、注册、样式与分发产物测试 |
+```ts
+interface PromptComponent {
+  id: string
+  kind: 'native' | 'supplement'
+  role: 'system' | 'user' | 'assistant'
+  position: 'after_system' | 'anchored' | 'tail'
+  order: number
+  enabled: boolean
+  template: string
+  origin?: string
+}
+```
+
+这些字段分别描述不同维度，不以 `kind` 代替位置、角色或用途：
+
+- `kind` 只区分来源：`native` 是 Host 在运行时发现的只读组件；`supplement` 是用户可编排并持久化的补充组件。
+- `role` 是模型所见的独立消息角色，可以是 `system`、`user` 或 `assistant`。
+- `position` 是独立插入位置：
+  - `after_system`：独立 system 槽之后、第一条原生会话消息之前；
+  - `anchored`：最后一条真实用户消息之后，找不到锚点时跳过；
+  - `tail`：原生消息序列末尾。
+- `origin` 只用于覆盖。补充组件未设置 `origin` 时是普通注入；设置为某个原生组件 id 时，同一个补充组件即覆盖该原生组件，不存在单独的覆盖 kind。
+
+同一位置的补充组件按 `order` 升序排列；`order` 相同时保留设置中的声明顺序。
+
+## 原生覆盖
+
+覆盖仍使用有序 marker section 和 `system-prompt/assemble` waterfall，不依赖静态原生目录：
+
+1. `origin` 指向当前组装中存在的原生组件时，waterfall 移除原始组件。
+2. 覆盖组件启用时，其替换文本与普通补充完全一样，按自身 `role`、`position`、`order` 进入消息序列。
+3. 覆盖组件设为 `enabled=false` 时只移除原始组件，相当于关闭该原生组件。
+4. `origin` 在本次组装中不存在时，不会凭空生成替换内容。
+
+## 运行时组装
+
+配置集合由 `ComponentPipeline` 激活。每次设置变更先调用旧组合效果的 disposer，再把新集合施加为一个 Cordis 生成器效果；marker、覆盖映射与补充消息映射分别返回原子逆，组合逆由 `ctx.effect()` 按结构生成。
+
+原生目录在运行时动态发现。插件监听 `system-prompt/change` 并重新执行真实 `systemPrompt.assemble()`；waterfall 在覆盖前捕获原生 name、text 与组装次序，在覆盖后捕获实际 system 槽序列。浏览器通过同源 `GET /prompt-studio/state` 读取该单值快照。
+
+补充消息在 system-prompt 组装时冻结本轮组件与活变量，再通过 `llm/stream` 的既有扩展接缝生成一次性请求副本。它们只进入本次模型请求，不写入会话记录。
+
+## 模板变量
+
+模板支持以下引用：
+
+- `{{user_input}}`：当前会话最后一条真实用户输入；
+- `{{model}}`：当前 Agent 选择的模型；
+- `{{cwd}}`：当前会话工作目录。
+
+这些值在每次组装时从 `AssembleContext.agent`、`agent.session` 和当前 Agent 选项读取，不是保存时快照。
+
+## 设置
+
+`settings.yaml` 中只持久化用户补充组件：
+
+```yaml
+prompt-studio:
+  components:
+    - id: supplement:message
+      kind: supplement
+      role: user
+      position: tail
+      order: 100
+      enabled: true
+      template: 请先复述当前目标。
+```
+
+运行时原生组件不写入设置。
+
+## 使用
+
+1. 打开任意对话，选择 **Prompt Studio** 标签页。
+2. 选择 **新增补充**，分别编辑标识、顺序、位置、角色、可选覆盖目标与模板。
+3. 如需覆盖原生组件，也可在对应原生行选择 **创建覆盖**；生成的仍是 `kind=supplement` 组件，只是带有 `origin`。
+4. 在 **完整预览** 中检查 system 槽序列和各位置的补充消息。
+5. 选择 **保存更改**。设置保存后立即撤销旧组合并施加新组合。
 
 ## 安装与启用
 
@@ -26,63 +93,33 @@ export DSH_HOME=/path/to/dsh-data
 /path/to/dsh/bin/dsh plugin list
 ```
 
-安装后默认禁用；`enable` 将其写入启用索引。命令行与正在运行的 Web 进程不共享内存，因此通过命令行启用后需重启 `dsh web`，再刷新浏览器。启用成功后，`dsh plugin list` 显示 `enabled moeblack/prompt-studio@0.1.0`。
-
-若当前 DSH 组合仍加载 monorepo 内的 `@deepseek-ai/dsh-client-ui-prompt-studio`，请先把对应 Loader 行设为 `disabled: true`。两种分发形态拥有同一个配置段与同一个对话页视图编号，不能同时挂载；原包可以保留在源码树中作为回退。
-
-## 已知前提
-
-浏览器端读写 `prompt-studio` 配置段，需要宿主的 `packages/host/apiproxy/src/api-proxy.ts` 在 `PRODUCT_SETTINGS_NAMESPACES` 白名单中加入 `'prompt-studio'`，否则读写请求会被拒绝（错误码 `settings-not-exposed`）。这是 DSH 配置开放机制的现状，并非本插件缺陷；官方已记录改进方向（见 issue #349）。在干净环境上安装插件后若保存无效，请先检查该项。
-
-## 使用
-
-1. 打开任意对话，选择 **Prompt Studio** 标签页。
-2. 在 **User sections** 中新增、编辑、启停、调整顺序或移除自定义内容块。
-3. 展开 **Built-in sections**，编辑内置内容块的顺序和文本，关闭该内容块，或选择 **Restore default** 恢复原值。
-4. 在 **Complete preview** 中确认启用项的最终顺序与未解析模板。
-5. 选择 **Save changes**。保存成功后，后续组装立即使用新配置。
+安装后默认禁用；启用索引由 DSH plugin registry 管理。命令行与已经运行的 Web 进程不共享内存，因此启用或替换插件产物后需重启 `dsh web` 并刷新浏览器。
 
 ## 构建
 
-构建依赖一个已安装依赖并完成构建的 DSH 源码树。脚本临时连接 DSH 的 TypeScript、tsdown、工作区类型与平台模块表，完成后删除这些临时连接；不会修改 DSH 源码树。
+构建依赖一个已安装依赖并完成构建的 DSH 源码树：
 
 ```sh
 DSH_ROOT=/path/to/dsh node scripts/build.mjs
 ```
 
-也可通过 package script 执行：
-
-```sh
-DSH_ROOT=/path/to/dsh pnpm run build
-```
-
-构建先运行 TypeScript 项目检查，再由 `tsdown` 生成自包含的服务端 ESM 与浏览器端 bundle，最后把可分发产物写到插件根目录：
+构建先运行 TypeScript 项目检查，再由 `tsdown` 生成自包含的服务端 ESM 与浏览器端 bundle，最后写入插件根目录：
 
 - `index.mjs`
 - `client.js`
 - `client.js.map`
 
-浏览器端构建沿用 DSH 的 `CLIENT_EXTERNALS` 与 bundle 纯净度检查；React、runtime、web-react 等平台模块由宿主模块表提供，CSS Modules 由官方预设编译并内联注入。
+## 文件
 
-## 测试
+| 文件 | 作用 |
+|---|---|
+| `dsh.plugin.json` | 插件清单、服务端入口与浏览器端入口 |
+| `src/index.ts` | 效果管线、动态目录、原生覆盖与发送前注入 |
+| `src/shared.ts` | 二分组件模型、校验、覆盖判定与预览函数 |
+| `src/config.ts` | 仅含 `components` 的 settings schema |
+| `src/client/` | 统一列表编辑器、运行时目录读取与设置保存 |
+| `scripts/build.mjs` | 类型检查和双端构建 |
 
-先构建产物，再运行测试：
+## 已知前提
 
-```sh
-DSH_ROOT=/path/to/dsh pnpm run check
-```
-
-或分别执行：
-
-```sh
-DSH_ROOT=/path/to/dsh node scripts/build.mjs
-DSH_ROOT=/path/to/dsh node scripts/test.mjs
-```
-
-## 契约要点
-
-- `dsh.plugin.json`、`client.js` 的模块加载器编号均为 `moeblack/prompt-studio`。
-- 服务端导出 Cordis 的命名 `apply` / `inject` 表面；浏览器端 bundle 同样导出 `apply` / `inject`。
-- `client.inject` 是启动图元数据；浏览器端实际等待的服务由 bundle 内 `inject = ['slots', 'conversation', 'connection']` 决定。
-- `contributes.tools` 与 `contributes.skills` 均为空；本插件只通过既有配置、system-prompt 与界面接缝工作。
-- `prompt-studio` 配置段使用保存后立即生效；已有会话历史不会因后续编辑而改写。
+浏览器端读写 `prompt-studio` 配置段，需要宿主在 `PRODUCT_SETTINGS_NAMESPACES` 中公开 `'prompt-studio'`。当前 DSH 官方 plugin-registry 集成环境已经包含该项。

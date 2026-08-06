@@ -793,399 +793,432 @@ defineMethod("transform", [
 //#region src/shared.ts
 /** Settings namespace shared by the Host registration and browser editor. */
 const PROMPT_STUDIO_NAMESPACE = "prompt-studio";
+/** Same-origin endpoint exposing the runtime-discovered prompt inventory. */
+const PROMPT_STUDIO_STATE_PATH = "/prompt-studio/state";
 /** Conversation-view placement: Chat is 0 and Trajectory is 10. */
 const PROMPT_STUDIO_VIEW_ORDER = 20;
-/** Initial order assigned to a newly added deployment section. */
-const DEFAULT_USER_SECTION_ORDER = 200;
+/** Initial order assigned to a newly added supplement. */
+const DEFAULT_SUPPLEMENT_ORDER = 100;
 /** Namespace reserved for ordered replacement markers owned by the Host half. */
 const PROMPT_STUDIO_OVERRIDE_MARKER_PREFIX = "prompt-studio:override-marker:";
+const KINDS = new Set(["native", "supplement"]);
+const POSITIONS = new Set([
+	"after_system",
+	"anchored",
+	"tail"
+]);
+const ROLES = new Set([
+	"system",
+	"user",
+	"assistant"
+]);
+function validateIdentifier(value, label) {
+	if (value.length === 0 || value.trim() !== value) throw new TypeError(`${label} must be non-empty and have no surrounding whitespace`);
+}
+/** Return whether a supplement targets one runtime-native component. */
+function isNativeOverride(component) {
+	return component.kind === "supplement" && component.origin !== void 0;
+}
 /**
-* Shipped section inventory. The registry remains authoritative at runtime;
-* this browser-safe snapshot gives the editor readable text and source labels
-* without opening a second Host API beside the settings seam.
+* Validate configured or runtime component rows.
+* @param components - rows to validate.
+* @param allowNative - whether runtime-only native rows are accepted.
 */
-const BUILTIN_SECTIONS = [
-	{
-		name: "harness:identity",
-		order: -100,
-		origin: "core/system-prompt (constructor)",
-		text: "You are an AI agent powered by the DeepSeek Harness SDK."
-	},
-	{
-		name: "harness:source",
-		order: -99,
-		origin: "ui/app-boot addHarnessSourceSection",
-		text: "The DeepSeek Harness implementation checkout is at <sourceRoot>. The checkout location and current working directory are separate values and may differ; never infer the working directory from this path. Use pwd to determine the current working directory. Use this checkout only to inspect or extend DSH itself."
-	},
-	{
-		name: "app:web-surface",
-		order: -98,
-		origin: "apps/cli/src/web.ts webSurfacePrompt",
-		text: "You are interacting with the user through the DeepSeek Harness Web GUI at <webUrl>. When the user refers to \"this page\", \"this GUI\", or \"this app\" without naming another target, they mean this GUI. The browser provides no implicit DOM, route, or screenshot context. Starting another server does not update this GUI. Do not start a replacement server unless the user asks; if one is needed, use a managed background task and verify its exact URL."
-	},
-	{
-		name: "deployment:persona",
-		order: 0,
-		origin: "web.cordis.yml persona",
-		text: "You are a coding agent powered by the {{model}} model. Your working directory is {{cwd}}."
-	},
-	{
-		name: "plan:policy",
-		order: 50,
-		origin: "plan/plan-mode (dynamic, plan mode only)",
-		text: "<plan fold policy, non-empty only when plan mode folds>"
-	},
-	{
-		name: "tool:read",
-		order: 100,
-		origin: "fs/tool-fs/src/read.ts",
-		text: "Use the read tool — not shell commands like cat — to inspect text files. Results include line numbers. Use offset and limit to continue reading large files."
-	},
-	{
-		name: "tool:write",
-		order: 101,
-		origin: "fs/tool-fs/src/write.ts",
-		text: "Use the write tool to create files or completely replace file contents. Existing files are overwritten, so read an existing file first (the default fs-policy requires it) and prefer edit for targeted changes."
-	},
-	{
-		name: "tool:edit",
-		order: 102,
-		origin: "fs/tool-fs/src/edit.ts",
-		text: "Use the edit tool for targeted changes to existing UTF-8 text files. It replaces literal old_string with new_string; by default old_string must appear exactly once. If old_string appears multiple times, provide a more specific old_string or set replace_all to true. Read the file first (the default fs-policy requires it), unless you just created or edited it in this session."
-	},
-	{
-		name: "tool:glob",
-		order: 103,
-		origin: "fs/tool-fs-search/src/glob.ts",
-		text: "Use the glob tool — not shell find — to discover files by path pattern. A pattern with no \"/\" matches basenames at any depth, so \"*\" matches every file in the tree rather than its top level. Results are files only, never directories, and include hidden and ignored files."
-	},
-	{
-		name: "tool:grep",
-		order: 104,
-		origin: "fs/tool-fs-search/src/grep.ts",
-		text: "Use the grep tool — not shell grep or rg — to search file contents. Use read on a matched file when you need surrounding context."
-	},
-	{
-		name: "tool:bash",
-		order: 105,
-		origin: "bash/tool-bash/src/index.ts",
-		text: "Check the [exit code: N] marker on every bash result; investigate failures before moving on."
-	},
-	{
-		name: "tool:pwsh",
-		order: 105,
-		origin: "bash/tool-pwsh/src/index.ts",
-		text: "Non-zero exits are reported as [exit code: N] markers; investigate failures before moving on."
-	},
-	{
-		name: "tool:pty",
-		order: 106,
-		origin: "pty/tool-pty/src/index.ts",
-		text: "Use a terminal session only when work needs persistent terminal state or interactive stdin; prefer bash/read/write/edit for bounded one-shot operations. Track every terminal session id and close sessions that no longer matter."
-	},
-	{
-		name: "tool:tasks",
-		order: 106,
-		origin: "tasks/tool-tasks/src/index.ts",
-		text: "Track every background task id you start. You are notified in-session when a task finishes — do not busy-poll or sleep on one; keep working on independent steps and do not duplicate a running task's work. Before giving a final answer, collect every still-relevant task with task_output (set wait: true only when you are genuinely blocked on it), and task_kill tasks that stopped mattering."
-	},
-	{
-		name: "tool:web_search",
-		order: 110,
-		origin: "web/tool-web/src/search.ts",
-		text: "Use the web_search tool to discover current information on the web. It returns an optional answer plus a list of source URLs."
-	},
-	{
-		name: "tool:web_fetch",
-		order: 111,
-		origin: "web/tool-web/src/fetch.ts",
-		text: "Use the web_fetch tool to retrieve the content of a specific HTTP(S) URL (for example a result from web_search). It returns the page content decoded to text. Cite the URL as a markdown link when you use its content."
-	},
-	{
-		name: "tool:lsp",
-		order: 112,
-		origin: "lsp/tool-lsp/src/index.ts",
-		text: "Use search/read for ordinary navigation. Use lsp when textual matches are ambiguous or before a change requires precise definitions, implementations, or references."
-	},
-	{
-		name: "tool:session-query",
-		order: 113,
-		origin: "session-query/tool-session-query/src/index.ts",
-		text: "Use session_search to find relevant work from prior sessions, or session_event_search to search earlier events in one session."
-	},
-	{
-		name: "tool:goal",
-		order: 114,
-		origin: "goal/tool-goal/src/index.ts",
-		text: "Use goal tools for one long-running completion objective in the current session."
-	},
-	{
-		name: "tool:workflow",
-		order: 115,
-		origin: "workflow/tool-workflow/src/index.ts",
-		text: "Use the workflow tool ONLY when the user explicitly asks for a workflow or for large multi-agent orchestration."
-	},
-	{
-		name: "tool:ralph",
-		order: 116,
-		origin: "workflow/tool-ralph/src/index.ts",
-		text: "Use the ralph tool ONLY when the direct human explicitly asks for a Ralph loop or fresh-agent iterative execution."
-	}
-];
-const BUILTIN_NAMES = new Set(BUILTIN_SECTIONS.map((section) => section.name));
-/**
-* Validate the constraints the system-prompt registry cannot express in the settings object schema.
-* @param sections - deployment-authored rows to validate.
-*/
-function validateStudioSections(sections) {
-	const names = /* @__PURE__ */ new Set();
-	for (const section of sections) {
-		if (section.name.length === 0 || section.name.trim() !== section.name) throw new TypeError("prompt section names must be non-empty and have no surrounding whitespace");
-		if (!Number.isFinite(section.order)) throw new TypeError(`prompt section "${section.name}" order must be a finite number`);
-		if (BUILTIN_NAMES.has(section.name)) throw new TypeError(`prompt section "${section.name}" is built in and cannot be replaced by Prompt Studio`);
-		if (section.name.startsWith("prompt-studio:override-marker:")) throw new TypeError(`prompt section names beginning with "${PROMPT_STUDIO_OVERRIDE_MARKER_PREFIX}" are reserved by Prompt Studio`);
-		if (names.has(section.name)) throw new TypeError(`prompt section "${section.name}" is listed more than once`);
-		names.add(section.name);
+function validatePromptComponents(components, allowNative = false) {
+	const ids = /* @__PURE__ */ new Set();
+	const overrideTargets = /* @__PURE__ */ new Set();
+	for (const component of components) {
+		validateIdentifier(component.id, "prompt component ids");
+		if (!KINDS.has(component.kind)) throw new TypeError(`prompt component "${component.id}" has an invalid kind`);
+		if (!POSITIONS.has(component.position)) throw new TypeError(`prompt component "${component.id}" has an invalid position`);
+		if (!ROLES.has(component.role)) throw new TypeError(`prompt component "${component.id}" has an invalid role`);
+		if (!Number.isFinite(component.order)) throw new TypeError(`prompt component "${component.id}" order must be a finite number`);
+		if (component.id.startsWith("prompt-studio:override-marker:")) throw new TypeError(`prompt component ids beginning with "${PROMPT_STUDIO_OVERRIDE_MARKER_PREFIX}" are reserved`);
+		if (ids.has(component.id)) throw new TypeError(`prompt component "${component.id}" is listed more than once`);
+		ids.add(component.id);
+		if (component.kind === "native") {
+			if (!allowNative) throw new TypeError(`native prompt component "${component.id}" cannot be persisted`);
+			if (component.origin !== void 0) throw new TypeError(`native prompt component "${component.id}" cannot override another component`);
+			if (component.position !== "after_system" || component.role !== "system") throw new TypeError(`native prompt component "${component.id}" must use the system role and system position`);
+			continue;
+		}
+		if (component.origin === void 0) continue;
+		validateIdentifier(component.origin, `supplement "${component.id}" native target`);
+		if (overrideTargets.has(component.origin)) throw new TypeError(`native prompt component "${component.origin}" is overridden more than once`);
+		overrideTargets.add(component.origin);
 	}
 }
-/**
-* Validate that persisted built-in replacements name one shipped row each.
-* @param overrides - complete built-in replacement rows to validate.
-*/
-function validateBuiltinOverrides(overrides) {
-	const names = /* @__PURE__ */ new Set();
-	for (const override of overrides) {
-		if (!BUILTIN_NAMES.has(override.name)) throw new TypeError(`prompt section "${override.name}" is not a built-in prompt section`);
-		if (!Number.isFinite(override.order)) throw new TypeError(`prompt section "${override.name}" order must be a finite number`);
-		if (names.has(override.name)) throw new TypeError(`prompt section "${override.name}" is listed more than once`);
-		names.add(override.name);
+function uniqueComponentId(preferred, used) {
+	if (!used.has(preferred)) {
+		used.add(preferred);
+		return preferred;
 	}
-}
-/**
-* Resolve every shipped row to its default or persisted editor state.
-* @param overrides - persisted replacements indexed by built-in name.
-* @returns the complete shipped inventory in editor state.
-*/
-function resolveBuiltinSections(overrides) {
-	validateBuiltinOverrides(overrides);
-	const byName = new Map(overrides.map((override) => [override.name, override]));
-	return BUILTIN_SECTIONS.map((section) => {
-		const override = byName.get(section.name);
-		if (override === void 0) return {
-			...section,
-			enabled: true,
-			overridden: false
-		};
-		return {
-			...section,
-			...override,
-			origin: section.origin,
-			overridden: true
-		};
-	});
-}
-/**
-* Resolve enabled built-ins and deployment sections in registry order.
-* @param sections - deployment-authored prompt rows.
-* @param overrides - persisted built-in replacements.
-* @returns enabled preview rows sorted by numeric order.
-*/
-function buildPreviewSections(sections, overrides = []) {
-	return [...resolveBuiltinSections(overrides).filter((section) => section.enabled).map((section) => ({
-		name: section.name,
-		order: section.order,
-		text: section.text,
-		origin: "builtin"
-	})), ...sections.filter((section) => section.enabled).map((section) => ({
-		name: section.name,
-		order: section.order,
-		text: section.text,
-		origin: "user"
-	}))].sort((left, right) => left.order - right.order);
-}
-/**
-* Produce the exact blank-line concatenation used by renderPrompt before variable interpolation.
-* @param sections - deployment-authored prompt rows.
-* @param overrides - persisted built-in replacements.
-* @returns complete unresolved prompt preview.
-*/
-function renderPreview(sections, overrides = []) {
-	return buildPreviewSections(sections, overrides).map((section) => section.text).filter((text) => text.length > 0).join("\n\n");
-}
-/**
-* Allocate the first readable user-section name absent from the draft.
-* @param sections - existing deployment-authored prompt rows.
-* @returns the first available `user:section` name.
-*/
-function nextSectionName(sections) {
-	const names = new Set(sections.map((section) => section.name));
-	const base = "user:section";
-	if (!names.has(base)) return base;
 	for (let suffix = 2;; suffix += 1) {
-		const candidate = `${base}-${String(suffix)}`;
-		if (!names.has(candidate)) return candidate;
+		const candidate = `${preferred}-${String(suffix)}`;
+		if (used.has(candidate)) continue;
+		used.add(candidate);
+		return candidate;
 	}
+}
+/** Resolve native override targets for a draft system-slot preview. */
+function buildDraftSystemComponents(native, configured) {
+	validatePromptComponents(native, true);
+	validatePromptComponents(configured);
+	const overrides = new Map(configured.filter(isNativeOverride).map((component) => [component.origin, component]));
+	return native.flatMap((component) => {
+		if (overrides.get(component.id) === void 0) return component.enabled ? [{ ...component }] : [];
+		return [];
+	}).sort((left, right) => left.order - right.order);
+}
+/** Concatenate enabled system components using the Host renderer's blank-line rule. */
+function renderSystemPreview(components) {
+	return components.map((component) => component.template).filter((text) => text.length > 0).join("\n\n");
+}
+/** Allocate the first readable supplement id absent from a component draft. */
+function nextSupplementId(components) {
+	return uniqueComponentId("supplement:message", new Set(components.map((component) => component.id)));
+}
+/** Allocate a readable id for a supplement overriding one native component. */
+function nextOverrideId(components, target) {
+	const used = new Set(components.map((component) => component.id));
+	return uniqueComponentId(`override:${target}`, used);
 }
 //#endregion
 //#region src/config.ts
 const finiteOrder = Schema.transform(Schema.number(), (value) => {
-	if (!Number.isFinite(value)) throw new TypeError("prompt section order must be a finite number");
+	if (!Number.isFinite(value)) throw new TypeError("prompt component order must be a finite number");
 	return value;
 }, true);
-const sectionSchema = Schema.object({
-	name: Schema.string().min(1),
+const kindSchema = Schema.union([Schema.const("native"), Schema.const("supplement")]);
+const positionSchema = Schema.union([
+	Schema.const("after_system"),
+	Schema.const("anchored"),
+	Schema.const("tail")
+]);
+const roleSchema = Schema.union([
+	Schema.const("system"),
+	Schema.const("user"),
+	Schema.const("assistant")
+]);
+const componentSchema = Schema.object({
+	id: Schema.string().min(1),
+	kind: kindSchema,
+	role: roleSchema,
+	position: positionSchema,
 	order: finiteOrder,
 	enabled: Schema.boolean().default(true),
-	text: Schema.string()
+	template: Schema.string(),
+	origin: Schema.string().min(1).default(void 0)
 });
-const uniqueSections = Schema.transform(Schema.array(sectionSchema), (sections) => {
-	validateStudioSections(sections);
-	return sections;
+const uniqueComponents = Schema.transform(Schema.array(componentSchema), (components) => {
+	validatePromptComponents(components);
+	return components;
 }, true);
-const overrideSchema = sectionSchema;
-const uniqueOverrides = Schema.transform(Schema.array(overrideSchema), (overrides) => {
-	validateBuiltinOverrides(overrides);
-	return overrides;
-}, true);
-/** Persisted settings schema for deployment rows and built-in replacements. */
-const studioConfigSchema = Schema.object({
-	sections: uniqueSections.default([]),
-	overrides: uniqueOverrides.default([])
-});
+/** Persisted settings schema. Only user-authored supplements are stored. */
+const studioConfigSchema = Schema.object({ components: uniqueComponents.default([]) });
 //#endregion
 //#region src/index.ts
 /** Branded Host settings key. */
 const PROMPT_STUDIO_SETTINGS_NAMESPACE = PROMPT_STUDIO_NAMESPACE;
 /** Stable Cordis plugin name. */
 const name = "client-ui-prompt-studio";
-/** Host services required before the namespace and sections can be installed. */
-const inject = ["settings", "systemPrompt"];
-function sameSection(left, right) {
-	return left.name === right.name && left.order === right.order && left.text === right.text;
+/** Host services required by the component and request pipelines. */
+const inject = [
+	"settings",
+	"systemPrompt",
+	"llm"
+];
+const REQUEST_SOURCE = "moeblack/prompt-studio";
+function markerName(target) {
+	return `${PROMPT_STUDIO_OVERRIDE_MARKER_PREFIX}${target}`;
 }
-/** Maintains the exact enabled settings set in the system-prompt registry. */
-var PromptSectionBindings = class {
-	registry;
-	active = /* @__PURE__ */ new Map();
-	constructor(registry) {
-		this.registry = registry;
-	}
-	replace(sections) {
-		const next = new Map(sections.filter((section) => section.enabled).map((section) => [section.name, section]));
-		const staged = this.stageAdditions(next);
-		for (const [sectionName, active] of [...this.active]) {
-			const replacement = next.get(sectionName);
-			if (replacement === void 0) {
-				active.dispose();
-				this.active.delete(sectionName);
-				continue;
-			}
-			if (sameSection(active.section, replacement)) continue;
-			active.dispose();
-			this.active.set(sectionName, this.install(replacement));
+function cloneComponent(component) {
+	return { ...component };
+}
+/** Live values contributed by currently active configuration effects. */
+var RuntimeBindings = class {
+	ownedSectionNames = /* @__PURE__ */ new Set();
+	overridesByMarker = /* @__PURE__ */ new Map();
+	supplements = /* @__PURE__ */ new Map();
+	/** Activate one component and return its composed inverse. */
+	activate(ctx, component) {
+		if (component.kind === "native") throw new TypeError(`native prompt component "${component.id}" cannot be activated from settings`);
+		if (isNativeOverride(component)) {
+			const snapshot = {
+				...component,
+				origin: component.origin
+			};
+			const marker = markerName(snapshot.origin);
+			return ctx.effect(function* () {
+				this.ownedSectionNames.add(marker);
+				this.overridesByMarker.set(marker, snapshot);
+				if (snapshot.enabled) this.supplements.set(snapshot.id, snapshot);
+				yield () => {
+					this.supplements.delete(snapshot.id);
+					this.overridesByMarker.delete(marker);
+					this.ownedSectionNames.delete(marker);
+				};
+				yield ctx.systemPrompt.section({
+					name: marker,
+					order: snapshot.order,
+					text: ""
+				});
+			}.bind(this), `prompt-studio: override ${snapshot.origin}`);
 		}
-		for (const [sectionName, active] of staged) this.active.set(sectionName, active);
-	}
-	dispose() {
-		for (const active of this.active.values()) active.dispose();
-		this.active.clear();
-	}
-	stageAdditions(next) {
-		const staged = /* @__PURE__ */ new Map();
-		try {
-			for (const [sectionName, section] of next) if (!this.active.has(sectionName)) staged.set(sectionName, this.install(section));
-			return staged;
-		} catch (error) {
-			for (const active of staged.values()) active.dispose();
-			throw error;
-		}
-	}
-	install(section) {
-		const promptSection = {
-			name: section.name,
-			order: section.order,
-			text: section.text
-		};
-		return {
-			section: promptSection,
-			dispose: this.registry.section(promptSection)
-		};
+		if (!component.enabled) return ctx.effect(() => () => void 0, `prompt-studio: disabled ${component.id}`);
+		const snapshot = cloneComponent(component);
+		return ctx.effect(function* () {
+			this.supplements.set(snapshot.id, snapshot);
+			yield () => {
+				this.supplements.delete(snapshot.id);
+			};
+		}.bind(this), `prompt-studio: supplement ${component.id}`);
 	}
 };
-function markerName(sectionName) {
-	return `${PROMPT_STUDIO_OVERRIDE_MARKER_PREFIX}${sectionName}`;
+/** Replaces a complete configuration by recovering and reapplying one composed effect. */
+var ComponentPipeline = class {
+	ctx;
+	bindings;
+	recover = () => void 0;
+	constructor(ctx, bindings) {
+		this.ctx = ctx;
+		this.bindings = bindings;
+	}
+	replace(components) {
+		validatePromptComponents(components);
+		this.recover();
+		const snapshots = components.map(cloneComponent);
+		this.recover = this.ctx.effect(function* () {
+			for (const component of snapshots) yield this.bindings.activate(this.ctx, component);
+		}.bind(this), "prompt-studio: configured component set");
+	}
+};
+function applyOverrides(assembly, overridesByMarker) {
+	const matchedOverrideIds = /* @__PURE__ */ new Set();
+	if (overridesByMarker.size === 0) return matchedOverrideIds;
+	const presentNames = new Set(assembly.sections.map((section) => section.name));
+	const replacedTargets = /* @__PURE__ */ new Set();
+	for (const [marker, override] of overridesByMarker) {
+		if (!presentNames.has(marker) || !presentNames.has(override.origin)) continue;
+		replacedTargets.add(override.origin);
+		matchedOverrideIds.add(override.id);
+	}
+	assembly.sections = assembly.sections.flatMap((section) => {
+		if (overridesByMarker.get(section.name) !== void 0) return [];
+		return replacedTargets.has(section.name) ? [] : [section];
+	});
+	return matchedOverrideIds;
 }
-function materializeOverrideMarkers(overrides) {
-	return overrides.map((override) => ({
-		name: markerName(override.name),
-		order: override.order,
+function runtimeNative(sections, ownedSectionNames) {
+	return sections.filter((section) => !ownedSectionNames.has(section.name)).map((section, order) => ({
+		id: section.name,
+		kind: "native",
+		position: "after_system",
+		role: "system",
+		order,
 		enabled: true,
-		text: override.enabled ? override.text : ""
+		template: section.text
 	}));
 }
-/**
-* Carries override order through the registry without colliding with an
-* existing same-scope section such as a subagent persona. The assembly seam
-* replaces each marker with its target, or removes both when the row is closed.
-*/
-var BuiltinOverrideBindings = class {
-	markers;
-	overridesByMarker = /* @__PURE__ */ new Map();
-	constructor(registry) {
-		this.markers = new PromptSectionBindings(registry);
+function effectiveAssembly(sections) {
+	return sections.map((section, order) => ({
+		id: section.name,
+		kind: "native",
+		position: "after_system",
+		role: "system",
+		order,
+		enabled: true,
+		template: section.text
+	}));
+}
+/** Latest value-level snapshot of the runtime registry. */
+var RuntimeCatalogStore = class {
+	revision = 0;
+	native = [];
+	assembled = [];
+	commit(native, assembled) {
+		const nextNative = native.map(cloneComponent);
+		const nextAssembled = assembled.map(cloneComponent);
+		if (JSON.stringify(nextNative) === JSON.stringify(this.native) && JSON.stringify(nextAssembled) === JSON.stringify(this.assembled)) return;
+		this.native = nextNative;
+		this.assembled = nextAssembled;
+		this.revision += 1;
 	}
-	replace(overrides) {
-		validateBuiltinOverrides(overrides);
-		const next = overrides.map((override) => ({ ...override }));
-		this.markers.replace(materializeOverrideMarkers(next));
-		this.overridesByMarker = new Map(next.map((override) => [markerName(override.name), override]));
-	}
-	apply(assembly) {
-		if (this.overridesByMarker.size === 0) return;
-		const presentNames = new Set(assembly.sections.map((section) => section.name));
-		const replacedTargets = /* @__PURE__ */ new Set();
-		for (const [name, override] of this.overridesByMarker) if (presentNames.has(name)) replacedTargets.add(override.name);
-		assembly.sections = assembly.sections.flatMap((section) => {
-			const override = this.overridesByMarker.get(section.name);
-			if (override !== void 0) {
-				if (!presentNames.has(override.name) || !override.enabled) return [];
-				return [{
-					name: override.name,
-					text: section.text
-				}];
-			}
-			return replacedTargets.has(section.name) ? [] : [section];
-		});
-	}
-	dispose() {
-		this.markers.dispose();
-		this.overridesByMarker.clear();
+	snapshot() {
+		return {
+			revision: this.revision,
+			native: this.native.map(cloneComponent),
+			assembled: this.assembled.map(cloneComponent)
+		};
 	}
 };
-/** Register the live namespace and mirror its user rows and built-in replacements. */
-function apply(ctx) {
-	const scope = ctx.settings.register(PROMPT_STUDIO_SETTINGS_NAMESPACE, studioConfigSchema, { applies: "live" });
-	const userBindings = new PromptSectionBindings(ctx.systemPrompt);
-	const overrideBindings = new BuiltinOverrideBindings(ctx.systemPrompt);
-	const initial = scope.get();
-	validateStudioSections(initial.sections);
-	userBindings.replace(initial.sections);
-	overrideBindings.replace(initial.overrides);
-	const stopOverriding = ctx.on("system-prompt/assemble", (assembly, _context, next) => {
-		overrideBindings.apply(assembly);
-		return next();
-	}, { prepend: true });
-	const stopWatching = scope.watch((next) => {
-		validateStudioSections(next.sections);
-		userBindings.replace(next.sections);
-		overrideBindings.replace(next.overrides);
+function latestUserInput(agent) {
+	for (let index = agent.session.events.length - 1; index >= 0; index -= 1) {
+		const event = agent.session.events[index];
+		if (event?.type !== "user/message") continue;
+		return event.data.content.filter((block) => block.type === "text").map((block) => block.text).join("\n");
+	}
+}
+function liveVariables(agent) {
+	return {
+		user_input: latestUserInput(agent),
+		model: agent.options.model,
+		cwd: agent.session.header.cwd
+	};
+}
+function renderComponentTemplate(component, agent) {
+	const variables = liveVariables(agent);
+	return component.template.replace(/\{\{([^{}]*)\}\}/g, (reference, name) => {
+		if (!Object.hasOwn(variables, name)) throw new Error(`unknown prompt variable "${reference}" in component "${component.id}"`);
+		const value = variables[name];
+		if (value === void 0) throw new Error(`prompt variable "${reference}" has no value in component "${component.id}"`);
+		return value;
 	});
+}
+/** Request-owned supplementary plans materialized during the matching assembly. */
+var SupplementPlans = class {
+	bySession = /* @__PURE__ */ new Map();
+	prepare(agent, components) {
+		if (agent === void 0) return;
+		const plan = components.map((component, declaration) => ({
+			id: component.id,
+			position: component.position,
+			role: component.role,
+			order: component.order,
+			text: renderComponentTemplate(component, agent),
+			declaration
+		})).sort((left, right) => left.order - right.order || left.declaration - right.declaration);
+		if (plan.length === 0) {
+			this.bySession.delete(String(agent.session.id));
+			return;
+		}
+		this.bySession.set(String(agent.session.id), plan);
+	}
+	take(sessionId) {
+		const plan = this.bySession.get(sessionId);
+		this.bySession.delete(sessionId);
+		return plan;
+	}
+	clear() {
+		this.bySession.clear();
+	}
+};
+function supplementalMessage(supplement) {
+	return Object.freeze({
+		id: crypto.randomUUID(),
+		role: supplement.role,
+		content: Object.freeze([Object.freeze({
+			type: "text",
+			text: supplement.text
+		})]),
+		source: Object.freeze({
+			kind: "plugin",
+			plugin: REQUEST_SOURCE
+		})
+	});
+}
+function insertSupplements(nativeMessages, plan) {
+	const afterSystem = plan.filter((item) => item.position === "after_system").map(supplementalMessage);
+	const anchored = plan.filter((item) => item.position === "anchored").map(supplementalMessage);
+	const tail = plan.filter((item) => item.position === "tail").map(supplementalMessage);
+	let anchor = -1;
+	for (let index = nativeMessages.length - 1; index >= 0; index -= 1) {
+		const message = nativeMessages[index];
+		if (message?.role === "user" && message.source.kind === "user") {
+			anchor = index;
+			break;
+		}
+	}
+	const result = [...afterSystem];
+	for (let index = 0; index < nativeMessages.length; index += 1) {
+		const message = nativeMessages[index];
+		if (message !== void 0) result.push(message);
+		if (index === anchor) result.push(...anchored);
+	}
+	result.push(...tail);
+	return result;
+}
+function rewriteRequest(ctx, plans, options, next) {
+	if (!(options.sessionId !== void 0 && options.purpose === void 0 && Object.isFrozen(options) && Object.isFrozen(options.messages)) || options.sessionId === void 0) return next();
+	const plan = plans.take(String(options.sessionId));
+	if (plan === void 0) return next();
+	const messages = insertSupplements(options.messages, plan);
+	Object.freeze(messages);
+	const rewritten = Object.freeze({
+		...options,
+		messages
+	});
+	return ctx.llm.stream(rewritten);
+}
+function installCatalogRoute(ctx, catalog) {
+	ctx.inject(["httpServer"], (routeCtx) => {
+		routeCtx.effect(() => routeCtx.httpServer.register({
+			kind: "exact",
+			path: PROMPT_STUDIO_STATE_PATH,
+			handler: (request, response) => {
+				if (request.method !== "GET" && request.method !== "HEAD") {
+					response.writeHead(405);
+					response.end();
+					return;
+				}
+				const body = JSON.stringify(catalog.snapshot());
+				response.writeHead(200, {
+					"content-type": "application/json; charset=utf-8",
+					"cache-control": "no-store"
+				});
+				response.end(request.method === "HEAD" ? void 0 : body);
+			}
+		}), "prompt-studio: runtime catalog route");
+	});
+}
+/** Register the live namespace and unified component pipeline. */
+async function apply(ctx) {
+	const scope = ctx.settings.register(PROMPT_STUDIO_SETTINGS_NAMESPACE, studioConfigSchema, { applies: "live" });
+	const bindings = new RuntimeBindings();
+	const pipeline = new ComponentPipeline(ctx, bindings);
+	const catalog = new RuntimeCatalogStore();
+	const plans = new SupplementPlans();
+	ctx.systemPrompt.variable("user_input", (context) => context.agent === void 0 ? void 0 : latestUserInput(context.agent));
+	ctx.on("system-prompt/assemble", async (assembly, context, next) => {
+		const native = runtimeNative(assembly.sections, bindings.ownedSectionNames);
+		const matchedOverrideIds = applyOverrides(assembly, bindings.overridesByMarker);
+		const resolved = await next();
+		catalog.commit(native, effectiveAssembly(resolved.sections));
+		plans.prepare(context.agent, [...bindings.supplements.values()].filter((component) => !isNativeOverride(component) || matchedOverrideIds.has(component.id)));
+		return resolved;
+	}, { prepend: true });
+	let refreshRequested = false;
+	let refreshTask;
+	const requestRefresh = () => {
+		refreshRequested = true;
+		if (refreshTask !== void 0) return;
+		refreshTask = (async () => {
+			while (refreshRequested) {
+				refreshRequested = false;
+				await ctx.systemPrompt.assemble();
+			}
+		})().catch((error) => {
+			ctx.logger.warn("prompt-studio: runtime prompt discovery failed");
+			ctx.logger.warn(error);
+		}).finally(() => {
+			refreshTask = void 0;
+			if (refreshRequested) requestRefresh();
+		});
+	};
+	ctx.on("system-prompt/change", requestRefresh);
+	ctx.on("llm/stream", (options, next) => rewriteRequest(ctx, plans, options, next));
 	ctx.effect(() => () => {
-		stopWatching();
-		stopOverriding();
-		overrideBindings.dispose();
-		userBindings.dispose();
-	}, "ui-prompt-studio: live prompt sections");
+		plans.clear();
+	}, "prompt-studio: supplementary request plans");
+	installCatalogRoute(ctx, catalog);
+	const initial = scope.get();
+	validatePromptComponents(initial.components);
+	pipeline.replace(initial.components);
+	ctx.effect(() => scope.watch((next) => {
+		validatePromptComponents(next.components);
+		pipeline.replace(next.components);
+	}), "prompt-studio: settings component source");
+	await ctx.systemPrompt.assemble();
 }
 //#endregion
-export { BUILTIN_SECTIONS, DEFAULT_USER_SECTION_ORDER, PROMPT_STUDIO_NAMESPACE, PROMPT_STUDIO_SETTINGS_NAMESPACE, PROMPT_STUDIO_VIEW_ORDER, apply, buildPreviewSections, inject, name, nextSectionName, renderPreview, resolveBuiltinSections, studioConfigSchema, validateBuiltinOverrides, validateStudioSections };
+export { DEFAULT_SUPPLEMENT_ORDER, PROMPT_STUDIO_NAMESPACE, PROMPT_STUDIO_SETTINGS_NAMESPACE, PROMPT_STUDIO_STATE_PATH, PROMPT_STUDIO_VIEW_ORDER, apply, buildDraftSystemComponents, inject, isNativeOverride, name, nextOverrideId, nextSupplementId, renderSystemPreview, studioConfigSchema, validatePromptComponents };

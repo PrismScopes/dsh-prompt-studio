@@ -1,19 +1,19 @@
-/** Interactive prompt-section editor and exact template concatenation preview. */
+/** Unified prompt-component editor and request-layout preview. */
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import type { ConvViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { InjectFace } from '@deepseek-ai/dsh-client-ui-slots'
 import type { SnapshotSelectorHook } from '@deepseek-ai/dsh-client-web-react'
 import {
-  BUILTIN_SECTIONS,
-  DEFAULT_USER_SECTION_ORDER,
-  buildPreviewSections,
-  nextSectionName,
-  renderPreview,
-  resolveBuiltinSections,
-  type BuiltinSection,
-  type BuiltinSectionOverride,
-  type StudioConfig,
-  type StudioSection,
+  DEFAULT_SUPPLEMENT_ORDER,
+  buildDraftSystemComponents,
+  isNativeOverride,
+  nextOverrideId,
+  nextSupplementId,
+  renderSystemPreview,
+  type PromptComponent,
+  type PromptComponentKind,
+  type PromptComponentPosition,
+  type PromptComponentRole,
 } from '../shared.ts'
 import type { PromptStudioState, PromptStudioStore } from './store.ts'
 import styles from './PromptStudioView.module.css'
@@ -27,47 +27,60 @@ export interface PromptStudioViewInjected {
 /** Full conversation-view props after the injected face is composed. */
 export type PromptStudioViewProps = ConvViewProps & InjectFace<PromptStudioViewInjected>
 
-function copyConfig(state: Pick<PromptStudioState, 'sections' | 'overrides'>): StudioConfig {
-  return {
-    sections: state.sections.map(section => ({ ...section })),
-    overrides: state.overrides.map(override => ({ ...override })),
-  }
+interface DisplayRow {
+  component: PromptComponent
+  configuredIndex: number | null
+}
+
+const POSITION_ORDER: Record<PromptComponentPosition, number> = {
+  after_system: 0,
+  anchored: 1,
+  tail: 2,
+}
+
+const KIND_LABEL: Record<PromptComponentKind, string> = {
+  native: '原生',
+  supplement: '补充',
+}
+
+const POSITION_LABEL: Record<PromptComponentPosition, string> = {
+  after_system: '系统后',
+  anchored: '最后用户输入后',
+  tail: '请求尾部',
+}
+
+const ROLE_LABEL: Record<PromptComponentRole, string> = {
+  system: 'system',
+  user: 'user',
+  assistant: 'assistant',
+}
+
+function copyComponents(components: readonly PromptComponent[]): PromptComponent[] {
+  return components.map(component => ({ ...component }))
 }
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-function defaultBuiltin(name: string): BuiltinSection {
-  const section = BUILTIN_SECTIONS.find(candidate => candidate.name === name)
-  if (section === undefined) throw new Error(`unknown built-in prompt section "${name}"`)
-  return section
+function compareRows(left: DisplayRow, right: DisplayRow): number {
+  return POSITION_ORDER[left.component.position] - POSITION_ORDER[right.component.position]
+    || left.component.order - right.component.order
 }
 
-function isDefaultOverride(override: BuiltinSectionOverride, section: BuiltinSection): boolean {
-  return override.enabled && override.order === section.order && override.text === section.text
-}
-
-function replaceBuiltinOverride(
-  overrides: readonly BuiltinSectionOverride[],
-  name: string,
-  patch: Partial<Omit<BuiltinSectionOverride, 'name'>>,
-): BuiltinSectionOverride[] {
-  const shipped = defaultBuiltin(name)
-  const current = overrides.find(override => override.name === name) ?? {
-    name,
-    order: shipped.order,
-    enabled: true,
-    text: shipped.text,
+function previewText(system: readonly PromptComponent[], supplements: readonly PromptComponent[]): string {
+  const blocks: string[] = []
+  const systemText = renderSystemPreview(system)
+  if (systemText.length > 0) blocks.push(`[system]\n${systemText}`)
+  const sortedSupplements = supplements
+    .map((component, declaration) => ({ component, declaration }))
+    .sort((left, right) => POSITION_ORDER[left.component.position] - POSITION_ORDER[right.component.position]
+      || left.component.order - right.component.order
+      || left.declaration - right.declaration)
+  for (const { component } of sortedSupplements) {
+    blocks.push(`[${POSITION_LABEL[component.position]} · ${component.role} · ${component.id}]\n${component.template}`)
   }
-  const replacement = { ...current, ...patch }
-  if (isDefaultOverride(replacement, shipped)) {
-    return overrides.filter(override => override.name !== name)
-  }
-  if (overrides.some(override => override.name === name)) {
-    return overrides.map(override => override.name === name ? replacement : override)
-  }
-  return [...overrides, replacement]
+  return blocks.join('\n\n')
 }
 
 /** Conversation-view entry point. */
@@ -78,15 +91,15 @@ export function PromptStudioView({ controller, useSnapshot }: PromptStudioViewPr
     if (remote.status === 'idle') void controller.load()
   }, [controller, remote.status])
 
-  if (remote.status === 'idle' || (remote.status === 'loading' && remote.sections.length === 0)) {
-    return <div className={styles['status']}>Loading Prompt Studio…</div>
+  if (remote.status === 'idle' || (remote.status === 'loading' && remote.native.length === 0)) {
+    return <div className={styles['status']}>正在载入 Prompt Studio…</div>
   }
   if (remote.status === 'error') {
     return (
       <div className={styles['status']}>
         <p className={styles['error']}>{remote.error}</p>
         <button type="button" className={styles['secondaryButton']} onClick={() => { void controller.load() }}>
-          Retry
+          重试
         </button>
       </div>
     )
@@ -101,89 +114,109 @@ function PromptStudioEditor({
   controller: PromptStudioStore
   remote: PromptStudioState
 }): ReactNode {
-  const [draft, setDraft] = useState<StudioConfig>(() => copyConfig(remote))
+  const [draft, setDraft] = useState<PromptComponent[]>(() => copyComponents(remote.components))
   const [dirty, setDirty] = useState(false)
   const [editingIndex, setEditingIndex] = useState<number | null>(null)
-  const [editingBuiltin, setEditingBuiltin] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
 
   useEffect(() => {
-    setDraft(copyConfig(remote))
+    setDraft(copyComponents(remote.components))
     setDirty(false)
     setSaving(false)
     setSaveError(null)
-    setEditingIndex(index => index !== null && index < remote.sections.length ? index : null)
-    setEditingBuiltin(null)
-  }, [remote.overrides, remote.revision, remote.sections])
+    setEditingIndex(index => index !== null && index < remote.components.length ? index : null)
+  }, [remote.catalogRevision, remote.components, remote.revision])
 
-  const builtins = useMemo(() => resolveBuiltinSections(draft.overrides), [draft.overrides])
-  const previewRows = useMemo(
-    () => buildPreviewSections(draft.sections, draft.overrides),
-    [draft.overrides, draft.sections],
+  const rows = useMemo<DisplayRow[]>(() => [
+    ...remote.native.map(component => ({ component, configuredIndex: null })),
+    ...draft.map((component, configuredIndex) => ({ component, configuredIndex })),
+  ].sort(compareRows), [draft, remote.native])
+
+  const draftSystem = useMemo(
+    () => dirty ? buildDraftSystemComponents(remote.native, draft) : copyComponents(remote.assembled),
+    [dirty, draft, remote.assembled, remote.native],
   )
+  const requestSupplements = useMemo(() => {
+    const nativeIds = new Set(remote.native.map(component => component.id))
+    return draft.filter(component => component.enabled && (
+      !isNativeOverride(component)
+      || nativeIds.has(component.origin)
+    ))
+  }, [draft, remote.native])
   const preview = useMemo(
-    () => renderPreview(draft.sections, draft.overrides),
-    [draft.overrides, draft.sections],
+    () => previewText(draftSystem, requestSupplements),
+    [draftSystem, requestSupplements],
   )
 
-  const changeSection = (index: number, patch: Partial<StudioSection>): void => {
-    setDraft(current => ({
-      ...current,
-      sections: current.sections.map((section, position) => position === index
-        ? { ...section, ...patch }
-        : section),
+  const changeComponent = (index: number, patch: Partial<PromptComponent>): void => {
+    setDraft(current => current.map((component, position) => position === index
+      ? { ...component, ...patch }
+      : component))
+    setDirty(true)
+    setSaveError(null)
+  }
+
+  const changeOrigin = (index: number, origin: string): void => {
+    setDraft(current => current.map((component, position) => {
+      if (position !== index) return component
+      const next = { ...component }
+      if (origin.length === 0) delete next.origin
+      else next.origin = origin
+      return next
     }))
     setDirty(true)
     setSaveError(null)
   }
 
-  const addSection = (): void => {
+  const addSupplement = (): void => {
     setDraft((current) => {
-      const sections = [...current.sections, {
-        name: nextSectionName(current.sections),
-        order: DEFAULT_USER_SECTION_ORDER,
+      const next = [...current, {
+        id: nextSupplementId(current),
+        kind: 'supplement' as const,
+        position: 'tail' as const,
+        role: 'user' as const,
+        order: DEFAULT_SUPPLEMENT_ORDER,
         enabled: true,
-        text: '',
+        template: '',
       }]
-      setEditingIndex(sections.length - 1)
-      return { ...current, sections }
+      setEditingIndex(next.length - 1)
+      return next
     })
     setDirty(true)
     setSaveError(null)
   }
 
-  const removeSection = (index: number): void => {
-    setDraft(current => ({
-      ...current,
-      sections: current.sections.filter((_section, position) => position !== index),
-    }))
+  const addOverride = (native: PromptComponent): void => {
+    const existing = draft.findIndex(component => isNativeOverride(component) && component.origin === native.id)
+    if (existing >= 0) {
+      setEditingIndex(existing)
+      return
+    }
+    setDraft((current) => {
+      const next = [...current, {
+        id: nextOverrideId(current, native.id),
+        kind: 'supplement' as const,
+        position: 'after_system' as const,
+        role: 'system' as const,
+        order: native.order,
+        enabled: true,
+        template: native.template,
+        origin: native.id,
+      }]
+      setEditingIndex(next.length - 1)
+      return next
+    })
+    setDirty(true)
+    setSaveError(null)
+  }
+
+  const removeComponent = (index: number): void => {
+    setDraft(current => current.filter((_component, position) => position !== index))
     setEditingIndex((current) => {
-      if (current === null) return null
-      if (current === index) return null
+      if (current === null || current === index) return null
       return current > index ? current - 1 : current
     })
-    setDirty(true)
-    setSaveError(null)
-  }
-
-  const changeBuiltin = (
-    name: string,
-    patch: Partial<Omit<BuiltinSectionOverride, 'name'>>,
-  ): void => {
-    setDraft(current => ({
-      ...current,
-      overrides: replaceBuiltinOverride(current.overrides, name, patch),
-    }))
-    setDirty(true)
-    setSaveError(null)
-  }
-
-  const restoreBuiltin = (name: string): void => {
-    setDraft(current => ({
-      ...current,
-      overrides: current.overrides.filter(override => override.name !== name),
-    }))
     setDirty(true)
     setSaveError(null)
   }
@@ -203,12 +236,12 @@ function PromptStudioEditor({
         <div>
           <h1 className={styles['title']}>Prompt Studio</h1>
           <p className={styles['intro']}>
-            Edit shipped and deployment sections, choose their assembly order, and inspect the complete prompt template before variables are resolved.
+            统一编排只读原生组件与可编辑补充组件；角色、位置和原生覆盖目标彼此独立。
           </p>
         </div>
         <div className={styles['headerActions']}>
-          <button type="button" className={styles['secondaryButton']} disabled={!remote.writable} onClick={addSection}>
-            Add section
+          <button type="button" className={styles['secondaryButton']} disabled={!remote.writable} onClick={addSupplement}>
+            新增补充
           </button>
           <button
             type="button"
@@ -216,191 +249,190 @@ function PromptStudioEditor({
             disabled={!dirty || saving || !remote.writable}
             onClick={save}
           >
-            {saving ? 'Saving…' : 'Save changes'}
+            {saving ? '正在保存…' : '保存更改'}
           </button>
         </div>
       </div>
 
-      {!remote.writable ? <p className={styles['notice']}>The active settings provider is read-only.</p> : null}
-      {remote.status === 'loading' ? <p className={styles['notice']}>Refreshing settings…</p> : null}
+      {!remote.writable ? <p className={styles['notice']}>当前设置提供方为只读。</p> : null}
+      {remote.status === 'loading' ? <p className={styles['notice']}>正在刷新运行时组件…</p> : null}
       {saveError !== null ? <p className={styles['error']}>{saveError}</p> : null}
 
       <div className={styles['columns']}>
-        <section className={styles['editorColumn']} aria-label="Prompt sections">
+        <section className={styles['editorColumn']} aria-label="统一提示词组件">
           <div className={styles['sectionHeading']}>
             <div>
-              <h2 className={styles['subtitle']}>User sections</h2>
-              <p className={styles['caption']}>Enabled rows are registered immediately after a successful save.</p>
+              <h2 className={styles['subtitle']}>组件</h2>
+              <p className={styles['caption']}>原生组件来自运行时组装快照；补充组件保存后由统一效果管线撤销并重施加。</p>
             </div>
-            <span className={styles['count']}>{String(draft.sections.length)}</span>
+            <span className={styles['count']}>{String(rows.length)}</span>
           </div>
 
-          {draft.sections.length === 0
-            ? <p className={styles['empty']}>No user sections.</p>
-            : (
-              <ol className={styles['userList']}>
-                {draft.sections.map((section, index) => (
-                  <li key={`${String(index)}:${section.name}`} className={styles['userCard']}>
-                    <div className={styles['rowHeader']}>
-                      <label className={styles['enabledControl']}>
-                        <input
-                          type="checkbox"
-                          checked={section.enabled}
-                          disabled={!remote.writable}
-                          onChange={(event) => { changeSection(index, { enabled: event.target.checked }) }}
-                        />
-                        <span>{section.enabled ? 'Enabled' : 'Disabled'}</span>
-                      </label>
-                      <span className={styles['sectionName']}>{section.name || '(unnamed section)'}</span>
-                      <span className={styles['orderBadge']}>Order {String(section.order)}</span>
-                      <button
-                        type="button"
-                        className={styles['textButton']}
-                        onClick={() => { setEditingIndex(editingIndex === index ? null : index) }}
-                      >
-                        {editingIndex === index ? 'Close' : 'Edit'}
-                      </button>
-                      <button
-                        type="button"
-                        className={styles['dangerButton']}
-                        disabled={!remote.writable}
-                        onClick={() => { removeSection(index) }}
-                      >
-                        Remove
-                      </button>
-                    </div>
-
-                    {editingIndex === index
-                      ? (
-                        <div className={styles['sectionEditor']}>
-                          <label className={styles['field']}>
-                            <span className={styles['fieldLabel']}>Name</span>
-                            <input
-                              className={styles['input']}
-                              value={section.name}
-                              disabled={!remote.writable}
-                              onChange={(event) => { changeSection(index, { name: event.target.value }) }}
-                            />
-                          </label>
-                          <label className={styles['field']}>
-                            <span className={styles['fieldLabel']}>Order</span>
-                            <input
-                              className={styles['orderInput']}
-                              type="number"
-                              value={section.order}
-                              disabled={!remote.writable}
-                              onChange={(event) => { changeSection(index, { order: Number(event.target.value) }) }}
-                            />
-                          </label>
-                          <label className={`${styles['field']} ${styles['textField']}`}>
-                            <span className={styles['fieldLabel']}>Section text</span>
-                            <textarea
-                              className={styles['textarea']}
-                              value={section.text}
-                              disabled={!remote.writable}
-                              rows={8}
-                              onChange={(event) => { changeSection(index, { text: event.target.value }) }}
-                            />
-                          </label>
-                        </div>
-                      )
-                      : section.text.length > 0
-                        ? <p className={styles['excerpt']}>{section.text}</p>
-                        : <p className={styles['emptyText']}>Empty text contributes nothing to the rendered prompt.</p>}
-                  </li>
-                ))}
-              </ol>
-            )}
-
-          <details className={styles['builtins']}>
-            <summary className={styles['builtinsSummary']}>
-              Built-in sections <span className={styles['count']}>{String(BUILTIN_SECTIONS.length)}</span>
-            </summary>
-            <ol className={styles['builtinList']}>
-              {builtins.map(section => (
-                <li
-                  key={section.name}
-                  className={styles['builtinCard']}
-                  aria-label={`Built-in section ${section.name}`}
-                >
+          <ol className={styles['componentList']}>
+            {rows.map(({ component, configuredIndex }) => {
+              const isNative = configuredIndex === null
+              const editing = configuredIndex !== null && editingIndex === configuredIndex
+              const override = isNativeOverride(component)
+              const overrideExists = isNative && draft.some(item => isNativeOverride(item) && item.origin === component.id)
+              return (
+                <li key={`${component.kind}:${component.id}:${String(configuredIndex)}`} className={styles['componentCard']}>
                   <div className={styles['rowHeader']}>
-                    <label className={styles['enabledControl']}>
-                      <input
-                        type="checkbox"
-                        checked={section.enabled}
-                        disabled={!remote.writable}
-                        onChange={(event) => { changeBuiltin(section.name, { enabled: event.target.checked }) }}
-                      />
-                      <span>{section.enabled ? 'On' : 'Off'}</span>
-                    </label>
-                    <span className={styles['sectionName']}>{section.name}</span>
-                    <span className={styles['stateBadge']}>
-                      {section.enabled ? section.overridden ? 'Overridden' : 'Default' : 'Closed'}
-                    </span>
-                    <span className={styles['orderBadge']}>Order {String(section.order)}</span>
-                    <button
-                      type="button"
-                      className={styles['textButton']}
-                      onClick={() => { setEditingBuiltin(editingBuiltin === section.name ? null : section.name) }}
-                    >
-                      {editingBuiltin === section.name ? 'Close' : 'Edit'}
-                    </button>
-                    <button
-                      type="button"
-                      className={styles['textButton']}
-                      disabled={!remote.writable || !section.overridden}
-                      onClick={() => { restoreBuiltin(section.name) }}
-                    >
-                      Restore default
-                    </button>
+                    {isNative
+                      ? <span className={styles['stateBadge']}>运行时</span>
+                      : (
+                        <label className={styles['enabledControl']}>
+                          <input
+                            type="checkbox"
+                            checked={component.enabled}
+                            disabled={!remote.writable}
+                            onChange={(event) => { changeComponent(configuredIndex, { enabled: event.target.checked }) }}
+                          />
+                          <span>{component.enabled ? '启用' : override ? '关闭原生' : '停用'}</span>
+                        </label>
+                      )}
+                    <span className={styles['kindBadge']}>{KIND_LABEL[component.kind]}</span>
+                    <span className={styles['sectionName']}>{component.id}</span>
+                    <span className={styles['positionBadge']}>{POSITION_LABEL[component.position]}</span>
+                    <span className={styles['roleBadge']}>{component.role}</span>
+                    <span className={styles['orderBadge']}>顺序 {String(component.order)}</span>
+                    {isNative
+                      ? (
+                        <button
+                          type="button"
+                          className={styles['textButton']}
+                          disabled={!remote.writable}
+                          onClick={() => { addOverride(component) }}
+                        >
+                          {overrideExists ? '编辑覆盖' : '创建覆盖'}
+                        </button>
+                      )
+                      : (
+                        <>
+                          <button
+                            type="button"
+                            className={styles['textButton']}
+                            onClick={() => { setEditingIndex(editing ? null : configuredIndex) }}
+                          >
+                            {editing ? '收起' : '编辑'}
+                          </button>
+                          <button
+                            type="button"
+                            className={styles['dangerButton']}
+                            disabled={!remote.writable}
+                            onClick={() => { removeComponent(configuredIndex) }}
+                          >
+                            {override ? '恢复原生' : '删除'}
+                          </button>
+                        </>
+                      )}
                   </div>
-                  <p className={styles['origin']}>{section.origin}</p>
-                  {editingBuiltin === section.name
+
+                  {component.origin !== undefined
+                    ? <p className={styles['origin']}>覆盖目标：{component.origin}</p>
+                    : null}
+
+                  {editing && configuredIndex !== null
                     ? (
-                      <div className={styles['sectionEditor']}>
+                      <div className={styles['componentEditor']}>
                         <label className={styles['field']}>
-                          <span className={styles['fieldLabel']}>Order</span>
+                          <span className={styles['fieldLabel']}>标识</span>
+                          <input
+                            className={styles['input']}
+                            value={component.id}
+                            disabled={!remote.writable}
+                            onChange={(event) => { changeComponent(configuredIndex, { id: event.target.value }) }}
+                          />
+                        </label>
+                        <label className={styles['field']}>
+                          <span className={styles['fieldLabel']}>顺序</span>
                           <input
                             className={styles['orderInput']}
                             type="number"
-                            value={section.order}
+                            value={component.order}
                             disabled={!remote.writable}
-                            onChange={(event) => { changeBuiltin(section.name, { order: Number(event.target.value) }) }}
+                            onChange={(event) => { changeComponent(configuredIndex, { order: Number(event.target.value) }) }}
                           />
                         </label>
-                        <label className={`${styles['field']} ${styles['builtinTextField']}`}>
-                          <span className={styles['fieldLabel']}>Section text</span>
+                        <label className={styles['field']}>
+                          <span className={styles['fieldLabel']}>位置</span>
+                          <select
+                            className={styles['select']}
+                            value={component.position}
+                            disabled={!remote.writable}
+                            onChange={(event) => { changeComponent(configuredIndex, { position: event.target.value as PromptComponentPosition }) }}
+                          >
+                            {Object.entries(POSITION_LABEL).map(([value, label]) => (
+                              <option key={value} value={value}>{label}</option>
+                            ))}
+                          </select>
+                        </label>
+                        <label className={styles['field']}>
+                          <span className={styles['fieldLabel']}>角色</span>
+                          <select
+                            className={styles['select']}
+                            value={component.role}
+                            disabled={!remote.writable}
+                            onChange={(event) => { changeComponent(configuredIndex, { role: event.target.value as PromptComponentRole }) }}
+                          >
+                            {Object.entries(ROLE_LABEL).map(([value, label]) => (
+                              <option key={value} value={value}>{label}</option>
+                            ))}
+                          </select>
+                        </label>
+                        <label className={styles['field']}>
+                          <span className={styles['fieldLabel']}>覆盖目标</span>
+                          <select
+                            className={styles['select']}
+                            value={component.origin ?? ''}
+                            disabled={!remote.writable}
+                            onChange={(event) => { changeOrigin(configuredIndex, event.target.value) }}
+                          >
+                            <option value="">不覆盖原生</option>
+                            {remote.native.map(item => <option key={item.id} value={item.id}>{item.id}</option>)}
+                          </select>
+                        </label>
+                        <label className={`${styles['field']} ${styles['templateField']}`}>
+                          <span className={styles['fieldLabel']}>模板</span>
                           <textarea
                             className={styles['textarea']}
-                            value={section.text}
+                            value={component.template}
                             disabled={!remote.writable}
                             rows={8}
-                            onChange={(event) => { changeBuiltin(section.name, { text: event.target.value }) }}
+                            onChange={(event) => { changeComponent(configuredIndex, { template: event.target.value }) }}
                           />
                         </label>
                       </div>
                     )
-                    : <p className={styles['builtinText']}>{section.text}</p>}
+                    : <p className={styles['excerpt']}>{component.template || '（空模板）'}</p>}
                 </li>
-              ))}
-            </ol>
-          </details>
+              )
+            })}
+          </ol>
         </section>
 
-        <section className={styles['previewColumn']} aria-label="Complete prompt preview">
+        <section className={styles['previewColumn']} aria-label="完整请求预览">
           <div className={styles['sectionHeading']}>
             <div>
-              <h2 className={styles['subtitle']}>Complete preview</h2>
-              <p className={styles['caption']}>Raw template; variables such as {'{{model}}'} and {'{{cwd}}'} resolve per request.</p>
+              <h2 className={styles['subtitle']}>完整预览</h2>
+              <p className={styles['caption']}>
+                未解析模板；{'{{user_input}}'}、{'{{model}}'} 与 {'{{cwd}}'} 在每次组装时读取当前会话。
+              </p>
             </div>
-            <span className={styles['count']}>{String(previewRows.length)} sections</span>
+            <span className={styles['count']}>{String(draftSystem.length + requestSupplements.length)} 项</span>
           </div>
           <div className={styles['assemblyOrder']}>
-            {previewRows.map((section, index) => (
-              <span key={`${section.origin}:${section.name}`} className={styles['assemblyRow']}>
+            {draftSystem.map((component, index) => (
+              <span key={`system:${component.kind}:${component.id}:${String(index)}`} className={styles['assemblyRow']}>
                 <span className={styles['assemblyIndex']}>{String(index + 1)}</span>
-                <span>{section.name}</span>
-                <span className={styles['assemblyOrderValue']}>{String(section.order)}</span>
+                <span>{component.id}</span>
+                <span className={styles['assemblyOrderValue']}>{KIND_LABEL[component.kind]}</span>
+              </span>
+            ))}
+            {requestSupplements.map(component => (
+              <span key={`supplement:${component.id}`} className={styles['assemblyRow']}>
+                <span className={styles['assemblyIndex']}>＋</span>
+                <span>{component.id}</span>
+                <span className={styles['assemblyOrderValue']}>{POSITION_LABEL[component.position]} · {component.role}</span>
               </span>
             ))}
           </div>

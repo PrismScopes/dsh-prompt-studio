@@ -1,38 +1,52 @@
 import z from 'schemastery'
 import {
-  validateBuiltinOverrides,
-  validateStudioSections,
-  type BuiltinSectionOverride,
+  validatePromptComponents,
+  type PromptComponent,
+  type PromptComponentKind,
+  type PromptComponentPosition,
+  type PromptComponentRole,
   type StudioConfig,
-  type StudioSection,
 } from './shared.ts'
 
 const finiteOrder = z.transform(z.number(), (value) => {
-  if (!Number.isFinite(value)) throw new TypeError('prompt section order must be a finite number')
+  if (!Number.isFinite(value)) throw new TypeError('prompt component order must be a finite number')
   return value
 }, true)
 
-const sectionSchema: z<StudioSection> = z.object({
-  name: z.string().min(1),
+const kindSchema = z.union([
+  z.const('native'),
+  z.const('supplement'),
+]) as z<PromptComponentKind>
+
+const positionSchema = z.union([
+  z.const('after_system'),
+  z.const('anchored'),
+  z.const('tail'),
+]) as z<PromptComponentPosition>
+
+const roleSchema = z.union([
+  z.const('system'),
+  z.const('user'),
+  z.const('assistant'),
+]) as z<PromptComponentRole>
+
+const componentSchema: z<PromptComponent> = z.object({
+  id: z.string().min(1),
+  kind: kindSchema,
+  role: roleSchema,
+  position: positionSchema,
   order: finiteOrder,
   enabled: z.boolean().default(true),
-  text: z.string(),
+  template: z.string(),
+  origin: z.string().min(1).default(undefined as unknown as string),
 })
 
-const uniqueSections = z.transform(z.array(sectionSchema), (sections) => {
-  validateStudioSections(sections)
-  return sections
+const uniqueComponents = z.transform(z.array(componentSchema), (components) => {
+  validatePromptComponents(components)
+  return components
 }, true)
 
-const overrideSchema: z<BuiltinSectionOverride> = sectionSchema
-
-const uniqueOverrides = z.transform(z.array(overrideSchema), (overrides) => {
-  validateBuiltinOverrides(overrides)
-  return overrides
-}, true)
-
-/** Persisted settings schema for deployment rows and built-in replacements. */
-export const studioConfigSchema: z<StudioConfig> = z.object({
-  sections: uniqueSections.default([]),
-  overrides: uniqueOverrides.default([]),
-})
+/** Persisted settings schema. Only user-authored supplements are stored. */
+export const studioConfigSchema = z.object({
+  components: uniqueComponents.default([]),
+}) as z<StudioConfig>
