@@ -1,4 +1,4 @@
-//#region ../dsh/vendor/cosmokit/src/misc.ts
+//#region ../dsh-2026/vendor/cosmokit/src/misc.ts
 /** Return true when a value is `null` or `undefined`. */
 function isNullable(value) {
 	return value === null || value === void 0;
@@ -23,7 +23,7 @@ function pick(source, keys, forced) {
 	return result;
 }
 //#endregion
-//#region ../dsh/vendor/cosmokit/src/types.ts
+//#region ../dsh-2026/vendor/cosmokit/src/types.ts
 /** Test values using `instanceof` with a `toStringTag` fallback. */
 function is(type, value) {
 	if (arguments.length === 1) return (value) => is(type, value);
@@ -125,7 +125,7 @@ function deepEqual(a, b, strict) {
 	}).every((key) => deepEqual(a[key], b[key], strict));
 }
 //#endregion
-//#region ../dsh/vendor/cosmokit/src/time.ts
+//#region ../dsh-2026/vendor/cosmokit/src/time.ts
 let Time;
 (function(_Time) {
 	_Time.millisecond = 1;
@@ -196,7 +196,7 @@ let Time;
 	_Time.template = template;
 })(Time || (Time = {}));
 //#endregion
-//#region ../dsh/vendor/schemastery/src/index.ts
+//#region ../dsh-2026/vendor/schemastery/src/index.ts
 const kSchema = Symbol.for("schemastery");
 const kValidationError = Symbol.for("ValidationError");
 globalThis.__schemastery_index__ ??= 0;
@@ -795,6 +795,8 @@ defineMethod("transform", [
 const PROMPT_STUDIO_NAMESPACE = "prompt-studio";
 /** Same-origin endpoint exposing the runtime-discovered prompt inventory. */
 const PROMPT_STUDIO_STATE_PATH = "/prompt-studio/state";
+/** Same-origin endpoint owned by the plugin for its private settings namespace. */
+const PROMPT_STUDIO_SETTINGS_PATH = "/prompt-studio/settings";
 /** Conversation-view placement: Chat is 0 and Trajectory is 10. */
 const PROMPT_STUDIO_VIEW_ORDER = 20;
 /** Initial order assigned to a newly added supplement. */
@@ -1291,7 +1293,55 @@ function rewriteRequest(ctx, plans, options, next) {
 	});
 	return ctx.llm.stream(rewritten);
 }
-function installCatalogRoute(ctx, catalog) {
+function respondJson(response, status, value, head = false) {
+	const body = JSON.stringify(value);
+	response.writeHead(status, {
+		"content-type": "application/json; charset=utf-8",
+		"cache-control": "no-store"
+	});
+	response.end(head ? void 0 : body);
+}
+function requestJson(request) {
+	return new Promise((resolve, reject) => {
+		const decoder = new TextDecoder();
+		let text = "";
+		request.on("data", (chunk) => {
+			text += typeof chunk === "string" ? chunk : decoder.decode(chunk, { stream: true });
+		});
+		request.on("end", () => {
+			try {
+				text += decoder.decode();
+				resolve(JSON.parse(text));
+			} catch (error) {
+				reject(error);
+			}
+		});
+		request.on("error", reject);
+	});
+}
+function settingsSnapshot(ctx) {
+	const descriptor = ctx.settings.describe().find((row) => row.ns === PROMPT_STUDIO_SETTINGS_NAMESPACE);
+	if (descriptor === void 0) throw new Error("prompt-studio settings namespace is not registered");
+	const value = descriptor.value;
+	return {
+		writable: ctx.settings.writable,
+		revision: descriptor.revision,
+		value: { components: value.components.map(cloneComponent) }
+	};
+}
+function settingsUpdate(value) {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new TypeError("请求体必须是 JSON 对象。");
+	const record = value;
+	if (!Number.isSafeInteger(record["expectedRevision"]) || record["expectedRevision"] < 0) throw new TypeError("expectedRevision 必须是非负安全整数。");
+	if (!Array.isArray(record["components"])) throw new TypeError("components 必须是数组。");
+	const components = structuredClone(record["components"]);
+	validatePromptComponents(components);
+	return {
+		components,
+		expectedRevision: record["expectedRevision"]
+	};
+}
+function installRoutes(ctx, catalog) {
 	ctx.inject(["httpServer"], (routeCtx) => {
 		routeCtx.effect(() => routeCtx.httpServer.register({
 			kind: "exact",
@@ -1302,14 +1352,32 @@ function installCatalogRoute(ctx, catalog) {
 					response.end();
 					return;
 				}
-				const body = JSON.stringify(catalog.snapshot());
-				response.writeHead(200, {
-					"content-type": "application/json; charset=utf-8",
-					"cache-control": "no-store"
-				});
-				response.end(request.method === "HEAD" ? void 0 : body);
+				respondJson(response, 200, catalog.snapshot(), request.method === "HEAD");
 			}
 		}), "prompt-studio: runtime catalog route");
+		routeCtx.effect(() => routeCtx.httpServer.register({
+			kind: "exact",
+			path: PROMPT_STUDIO_SETTINGS_PATH,
+			handler: async (request, response) => {
+				try {
+					if (request.method === "GET" || request.method === "HEAD") {
+						respondJson(response, 200, settingsSnapshot(routeCtx), request.method === "HEAD");
+						return;
+					}
+					if (request.method === "POST") {
+						const update = settingsUpdate(await requestJson(request));
+						await routeCtx.settings.replace(PROMPT_STUDIO_SETTINGS_NAMESPACE, { components: update.components }, update.expectedRevision);
+						respondJson(response, 200, settingsSnapshot(routeCtx));
+						return;
+					}
+					response.writeHead(405);
+					response.end();
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					respondJson(response, error instanceof TypeError ? 400 : 409, { error: message });
+				}
+			}
+		}), "prompt-studio: settings route");
 	});
 }
 /** Register the live namespace and unified component pipeline. */
@@ -1351,7 +1419,7 @@ async function apply(ctx) {
 	ctx.effect(() => () => {
 		plans.clear();
 	}, "prompt-studio: supplementary request plans");
-	installCatalogRoute(ctx, catalog);
+	installRoutes(ctx, catalog);
 	const initial = scope.get();
 	validatePromptComponents(initial.components);
 	pipeline.replace(initial.components);
@@ -1362,4 +1430,4 @@ async function apply(ctx) {
 	await ctx.systemPrompt.assemble();
 }
 //#endregion
-export { DEFAULT_SUPPLEMENT_ORDER, PROMPT_STUDIO_NAMESPACE, PROMPT_STUDIO_SETTINGS_NAMESPACE, PROMPT_STUDIO_STATE_PATH, PROMPT_STUDIO_VIEW_ORDER, apply, buildDraftSystemComponents, inject, isNativeOverride, name, nextOverrideId, nextSupplementId, renderSupplementBoundary, renderSystemPreview, studioConfigSchema, validatePromptComponents };
+export { DEFAULT_SUPPLEMENT_ORDER, PROMPT_STUDIO_NAMESPACE, PROMPT_STUDIO_SETTINGS_NAMESPACE, PROMPT_STUDIO_SETTINGS_PATH, PROMPT_STUDIO_STATE_PATH, PROMPT_STUDIO_VIEW_ORDER, apply, buildDraftSystemComponents, inject, isNativeOverride, name, nextOverrideId, nextSupplementId, renderSupplementBoundary, renderSystemPreview, studioConfigSchema, validatePromptComponents };

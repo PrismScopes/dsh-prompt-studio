@@ -1,6 +1,6 @@
 import { clientBundle } from './.dsh/packages/client/tsdown.client.ts'
 
-const PLUGIN_ID = 'moeblack/prompt-studio'
+const PLUGIN_ID = 'dsh-prompt-studio'
 const [, clientConfig] = clientBundle(PLUGIN_ID, [])
 
 export default [

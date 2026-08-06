@@ -11,7 +11,7 @@ interface PromptComponent {
   id: string
   kind: 'native' | 'supplement'
   role: 'system' | 'user' | 'assistant'
-  position: 'after_system' | 'anchored' | 'tail'
+  position?: 'after_system' | 'anchored' | 'tail'
   order: number
   enabled: boolean
   template: string
@@ -19,24 +19,43 @@ interface PromptComponent {
 }
 ```
 
-这些字段分别描述不同维度，不以 `kind` 代替位置、角色或用途：
+这些字段分别描述不同维度，不以 `kind` 代替角色或用途：
 
 - `kind` 只区分来源：`native` 是 Host 在运行时发现的只读组件；`supplement` 是用户可编排并持久化的补充组件。
-- `role` 是模型所见的独立消息角色，可以是 `system`、`user` 或 `assistant`。
-- `position` 是独立插入位置：
-  - `after_system`：独立 system 槽之后、第一条原生会话消息之前；
+- `role` 决定内容归宿：
+  - `system` 一律注册为有序 system section，最终与原生 sections 合并到全局唯一的 `system` 字段；此时不得设置 `position`；
+  - `user`、`assistant` 进入消息序列，必须设置 `position`。
+- `position` 只描述 user/assistant 消息所处的间隙：
+  - `after_system`：全局 system 字段之后、第一条原生会话消息之前；
   - `anchored`：最后一条真实用户消息之后，找不到锚点时跳过；
   - `tail`：原生消息序列末尾。
+
+> `anchored` 与 `tail` 的区别：简单对话中最后一条消息往往就是用户输入，两者重叠；但存在工具调用流（user → tool_call → tool_result → assistant）时完全不同——`anchored` 插在用户输入之后、工具调用流之前，`tail` 插在整个序列最末尾（工具结果与助手回复之后）。需要紧贴用户问题补充指令用 `anchored`，需要模型读完完整上下文再看到的内容用 `tail`。
+- `order` 有两种与归宿对应的含义：
+  - system 组件的 `order` 是 system section 的全局混排层级，和原生 sections 一起升序排列；约定 `-100` 是身份区、`0` 是 persona、`100–199` 是工具区，其他负值也在 persona 之前；
+  - user/assistant 组件的 `order` 只在同一个 `position` 间隙内排序，不参与跨间隙比较。
 - `origin` 只用于覆盖。补充组件未设置 `origin` 时是普通注入；设置为某个原生组件 id 时，同一个补充组件即覆盖该原生组件，不存在单独的覆盖 kind。
 
-同一位置的补充组件按 `order` 升序排列；`order` 相同时保留设置中的声明顺序。
+同一消息间隙的补充组件按 `(order, 声明顺序)` 排列。system sections 由 Host 依 `order` 与原生 sections 全局混排。
+
+## 内容合并与边界
+
+所有 system sections 最终渲染为同一个 `system` 字符串。每段补充内容在该字符串内部保留以下边界，原生内容不加包装：
+
+```xml
+<supplement id="supplement:example">
+补充提示词正文
+</supplement>
+```
+
+user/assistant 补充先进入选定间隙。若补充组与间隙左侧或右侧的相邻原生消息 `role` 相同，补充边界块会按先后关系合并进该原生消息的 `content`；若角色不同，则在该间隙创建新消息。相邻且同角色的补充也合并为一条消息，同时保留每个补充各自的 `<supplement>` 边界。
 
 ## 原生覆盖
 
 覆盖仍使用有序 marker section 和 `system-prompt/assemble` waterfall，不依赖静态原生目录：
 
 1. `origin` 指向当前组装中存在的原生组件时，waterfall 移除原始组件。
-2. 覆盖组件启用时，其替换文本与普通补充完全一样，按自身 `role`、`position`、`order` 进入消息序列。
+2. 覆盖组件启用时，其替换文本按自身 `role` 归宿：system 覆盖保留 marker 的全局 `order` 并进入唯一 system 字段；user/assistant 覆盖按 `position` 进入消息间隙。
 3. 覆盖组件设为 `enabled=false` 时只移除原始组件，相当于关闭该原生组件。
 4. `origin` 在本次组装中不存在时，不会凭空生成替换内容。
 
@@ -46,7 +65,7 @@ interface PromptComponent {
 
 原生目录在运行时动态发现。插件监听 `system-prompt/change` 并重新执行真实 `systemPrompt.assemble()`；waterfall 在覆盖前捕获原生 name、text 与组装次序，在覆盖后捕获实际 system 槽序列。浏览器通过同源 `GET /prompt-studio/state` 读取该单值快照。
 
-补充消息在 system-prompt 组装时冻结本轮组件与活变量，再通过 `llm/stream` 的既有扩展接缝生成一次性请求副本。它们只进入本次模型请求，不写入会话记录。
+system 补充直接通过 `systemPrompt.section()` 参与真实组装，不进入消息计划。user/assistant 补充在 system-prompt 组装时冻结本轮组件与活变量，再通过 `llm/stream` 的既有扩展接缝生成一次性请求副本。消息补充只进入本次模型请求，不写入会话记录。
 
 ## 模板变量
 
@@ -65,6 +84,12 @@ interface PromptComponent {
 ```yaml
 prompt-studio:
   components:
+    - id: supplement:identity
+      kind: supplement
+      role: system
+      order: -200
+      enabled: true
+      template: 你是一个严谨的工程助手。
     - id: supplement:message
       kind: supplement
       role: user
@@ -79,9 +104,9 @@ prompt-studio:
 ## 使用
 
 1. 打开任意对话，选择 **Prompt Studio** 标签页。
-2. 选择 **新增补充**，分别编辑标识、顺序、位置、角色、可选覆盖目标与模板。
+2. 选择 **新增补充**，分别编辑标识、角色、顺序、可选覆盖目标与模板；只有 user/assistant 角色显示消息间隙选择器。
 3. 如需覆盖原生组件，也可在对应原生行选择 **创建覆盖**；生成的仍是 `kind=supplement` 组件，只是带有 `origin`。
-4. 在 **完整预览** 中检查 system 槽序列和各位置的补充消息。
+4. 在 **完整预览** 中检查合并后的完整 system 内容及各消息间隙的补充内容。模型内容预览不插入 `[位置 · role · id]` 一类展示标签，补充来源只由实际发送的 `<supplement>` 边界表示。
 5. 选择 **保存更改**。设置保存后立即撤销旧组合并施加新组合。
 
 ## 安装与启用

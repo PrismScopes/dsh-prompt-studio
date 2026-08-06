@@ -1,14 +1,18 @@
 /** Prompt Studio browser half: one live conversation-view contribution. */
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
-import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
 import { bindSnapshotSelector } from '@deepseek-ai/dsh-client-web-react'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
+import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import {
   PROMPT_STUDIO_NAMESPACE,
   PROMPT_STUDIO_VIEW_ORDER,
 } from '../shared.ts'
 import { PromptStudioStore, refreshIfLoaded } from './store.ts'
-import { PromptStudioView, type PromptStudioViewInjected } from './PromptStudioView.tsx'
+import {
+  PromptStudioSettingsSection,
+  PromptStudioView,
+  type PromptStudioViewInjected,
+} from './PromptStudioView.tsx'
 
 export type { PromptStudioState } from './store.ts'
 export type { PromptStudioViewInjected, PromptStudioViewProps } from './PromptStudioView.tsx'
@@ -18,9 +22,9 @@ export const inject = ['slots', 'conversation', 'connection']
 
 /** Register the tab, its shared controller, and pushed invalidations. */
 export function apply(ctx: ClientContext): void {
-  const connection = ctx.get('connection') as ConnectionHandle
-  const controller = new PromptStudioStore(connection.api)
+  const controller = new PromptStudioStore()
   const useSnapshot = bindSnapshotSelector(controller.store)
+  const injected = (): PromptStudioViewInjected => ({ controller, useSnapshot })
 
   ctx.effect(() => {
     const refresh = (): void => { refreshIfLoaded(controller) }
@@ -38,6 +42,13 @@ export function apply(ctx: ClientContext): void {
     id: 'prompt-studio',
     order: PROMPT_STUDIO_VIEW_ORDER,
     label: 'Prompt Studio',
-    inject: (): PromptStudioViewInjected => ({ controller, useSnapshot }),
+    inject: injected,
   }, PromptStudioView)
+  ctx.slots.inject('settings.section', () => ctx.slots.register({
+    name: 'settings.section',
+    id: 'prompt-studio',
+    order: PROMPT_STUDIO_VIEW_ORDER,
+    label: 'Prompt Studio',
+    inject: injected,
+  }, PromptStudioSettingsSection))
 }

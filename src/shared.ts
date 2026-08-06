@@ -4,6 +4,9 @@ export const PROMPT_STUDIO_NAMESPACE = 'prompt-studio'
 /** Same-origin endpoint exposing the runtime-discovered prompt inventory. */
 export const PROMPT_STUDIO_STATE_PATH = '/prompt-studio/state'
 
+/** Same-origin endpoint owned by the plugin for its private settings namespace. */
+export const PROMPT_STUDIO_SETTINGS_PATH = '/prompt-studio/settings'
+
 /** Conversation-view placement: Chat is 0 and Trajectory is 10. */
 export const PROMPT_STUDIO_VIEW_ORDER = 20
 
@@ -42,6 +45,13 @@ export interface PromptComponent {
 /** Resolved value of the prompt-studio settings namespace. */
 export interface StudioConfig {
   components: PromptComponent[]
+}
+
+/** Browser-safe snapshot of the plugin-owned settings namespace. */
+export interface PromptStudioSettingsSnapshot {
+  writable: boolean
+  revision: number
+  value: StudioConfig
 }
 
 /** Runtime state returned by the Host inventory endpoint. */

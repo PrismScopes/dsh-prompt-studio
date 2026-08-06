@@ -17,12 +17,14 @@ import { studioConfigSchema } from './config.ts'
 import {
   PROMPT_STUDIO_NAMESPACE,
   PROMPT_STUDIO_OVERRIDE_MARKER_PREFIX,
+  PROMPT_STUDIO_SETTINGS_PATH,
   PROMPT_STUDIO_STATE_PATH,
   isNativeOverride,
   renderSupplementBoundary,
   validatePromptComponents,
   type NativeOverride,
   type PromptComponent,
+  type PromptStudioSettingsSnapshot,
   type RuntimePromptCatalog,
   type StudioConfig,
 } from './shared.ts'
@@ -30,6 +32,7 @@ import {
 export {
   DEFAULT_SUPPLEMENT_ORDER,
   PROMPT_STUDIO_NAMESPACE,
+  PROMPT_STUDIO_SETTINGS_PATH,
   PROMPT_STUDIO_STATE_PATH,
   PROMPT_STUDIO_VIEW_ORDER,
   buildDraftSystemComponents,
@@ -65,6 +68,9 @@ const SYSTEM_SECTION_PREFIX = 'prompt-studio:supplement-section:'
 
 interface HttpRequestLike {
   method?: string
+  on(event: 'data', listener: (chunk: Uint8Array | string) => void): this
+  on(event: 'end', listener: () => void): this
+  on(event: 'error', listener: (error: unknown) => void): this
 }
 
 interface HttpResponseLike {
@@ -76,7 +82,7 @@ interface HttpServerLike {
   register(route: {
     kind: 'exact'
     path: string
-    handler: (request: HttpRequestLike, response: HttpResponseLike) => void
+    handler: (request: HttpRequestLike, response: HttpResponseLike) => void | Promise<void>
   }): () => void
 }
 
@@ -498,7 +504,60 @@ function rewriteRequest(
   return ctx.llm.stream(rewritten)
 }
 
-function installCatalogRoute(ctx: Context, catalog: RuntimeCatalogStore): void {
+function respondJson(response: HttpResponseLike, status: number, value: unknown, head = false): void {
+  const body = JSON.stringify(value)
+  response.writeHead(status, {
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': 'no-store',
+  })
+  response.end(head ? undefined : body)
+}
+
+function requestJson(request: HttpRequestLike): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const decoder = new TextDecoder()
+    let text = ''
+    request.on('data', (chunk) => {
+      text += typeof chunk === 'string' ? chunk : decoder.decode(chunk, { stream: true })
+    })
+    request.on('end', () => {
+      try {
+        text += decoder.decode()
+        resolve(JSON.parse(text) as unknown)
+      } catch (error: unknown) {
+        reject(error)
+      }
+    })
+    request.on('error', reject)
+  })
+}
+
+function settingsSnapshot(ctx: Context): PromptStudioSettingsSnapshot {
+  const descriptor = ctx.settings.describe().find(row => row.ns === PROMPT_STUDIO_SETTINGS_NAMESPACE)
+  if (descriptor === undefined) throw new Error('prompt-studio settings namespace is not registered')
+  const value = descriptor.value as StudioConfig
+  return {
+    writable: ctx.settings.writable,
+    revision: descriptor.revision,
+    value: { components: value.components.map(cloneComponent) },
+  }
+}
+
+function settingsUpdate(value: unknown): { components: PromptComponent[]; expectedRevision: number } {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new TypeError('请求体必须是 JSON 对象。')
+  }
+  const record = value as Record<string, unknown>
+  if (!Number.isSafeInteger(record['expectedRevision']) || (record['expectedRevision'] as number) < 0) {
+    throw new TypeError('expectedRevision 必须是非负安全整数。')
+  }
+  if (!Array.isArray(record['components'])) throw new TypeError('components 必须是数组。')
+  const components = structuredClone(record['components']) as PromptComponent[]
+  validatePromptComponents(components)
+  return { components, expectedRevision: record['expectedRevision'] as number }
+}
+
+function installRoutes(ctx: Context, catalog: RuntimeCatalogStore): void {
   ctx.inject(['httpServer'], (routeCtx) => {
     routeCtx.effect(() => routeCtx.httpServer.register({
       kind: 'exact',
@@ -509,14 +568,36 @@ function installCatalogRoute(ctx: Context, catalog: RuntimeCatalogStore): void {
           response.end()
           return
         }
-        const body = JSON.stringify(catalog.snapshot())
-        response.writeHead(200, {
-          'content-type': 'application/json; charset=utf-8',
-          'cache-control': 'no-store',
-        })
-        response.end(request.method === 'HEAD' ? undefined : body)
+        respondJson(response, 200, catalog.snapshot(), request.method === 'HEAD')
       },
     }), 'prompt-studio: runtime catalog route')
+    routeCtx.effect(() => routeCtx.httpServer.register({
+      kind: 'exact',
+      path: PROMPT_STUDIO_SETTINGS_PATH,
+      handler: async (request, response) => {
+        try {
+          if (request.method === 'GET' || request.method === 'HEAD') {
+            respondJson(response, 200, settingsSnapshot(routeCtx), request.method === 'HEAD')
+            return
+          }
+          if (request.method === 'POST') {
+            const update = settingsUpdate(await requestJson(request))
+            await routeCtx.settings.replace(
+              PROMPT_STUDIO_SETTINGS_NAMESPACE,
+              { components: update.components },
+              update.expectedRevision,
+            )
+            respondJson(response, 200, settingsSnapshot(routeCtx))
+            return
+          }
+          response.writeHead(405)
+          response.end()
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message : String(error)
+          respondJson(response, error instanceof TypeError ? 400 : 409, { error: message })
+        }
+      },
+    }), 'prompt-studio: settings route')
   })
 }
 
@@ -570,7 +651,7 @@ export async function apply(ctx: Context): Promise<void> {
   ctx.on('system-prompt/change', requestRefresh)
   ctx.on('llm/stream', (options, next) => rewriteRequest(ctx, plans, options, next))
   ctx.effect(() => () => { plans.clear() }, 'prompt-studio: supplementary request plans')
-  installCatalogRoute(ctx, catalog)
+  installRoutes(ctx, catalog)
 
   const initial = scope.get()
   validatePromptComponents(initial.components)

@@ -1,18 +1,15 @@
 /** Browser controller for the prompt-studio settings and runtime inventory. */
-import type {
-  IApiClient,
-  SettingsNamespaceView,
-} from '@deepseek-ai/dsh-client-connection/client'
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
 import {
-  PROMPT_STUDIO_NAMESPACE,
+  PROMPT_STUDIO_SETTINGS_PATH,
   PROMPT_STUDIO_STATE_PATH,
   validatePromptComponents,
   type PromptComponent,
   type PromptComponentKind,
   type PromptComponentPosition,
   type PromptComponentRole,
+  type PromptStudioSettingsSnapshot,
   type RuntimePromptCatalog,
   type StudioConfig,
 } from '../shared.ts'
@@ -89,10 +86,6 @@ function decodeConfig(value: unknown): StudioConfig {
   return { components: decodeComponents(candidate.components, 'components', false) }
 }
 
-function namespaceFrom(response: SettingsNamespaceView): StudioConfig {
-  return decodeConfig(response.value)
-}
-
 function decodeCatalog(value: unknown): RuntimePromptCatalog {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new TypeError('prompt-studio runtime catalog is not an object')
@@ -106,6 +99,42 @@ function decodeCatalog(value: unknown): RuntimePromptCatalog {
     native: decodeComponents(candidate.native, 'native catalog', true),
     assembled: decodeComponents(candidate.assembled, 'assembled catalog', true),
   }
+}
+
+function decodeSettings(value: unknown): PromptStudioSettingsSnapshot {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new TypeError('prompt-studio settings snapshot is not an object')
+  }
+  const candidate = value as Record<string, unknown>
+  if (typeof candidate['writable'] !== 'boolean') {
+    throw new TypeError('prompt-studio settings writable flag is invalid')
+  }
+  if (typeof candidate['revision'] !== 'number' || !Number.isSafeInteger(candidate['revision'])) {
+    throw new TypeError('prompt-studio settings revision is invalid')
+  }
+  return {
+    writable: candidate['writable'],
+    revision: candidate['revision'],
+    value: decodeConfig(candidate['value']),
+  }
+}
+
+async function responseValue(response: Response): Promise<unknown> {
+  const value = await response.json() as unknown
+  if (response.ok) return value
+  const message = typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)['error']
+    : undefined
+  throw new Error(typeof message === 'string' ? message : `请求失败：HTTP ${String(response.status)}`)
+}
+
+async function loadSettings(): Promise<PromptStudioSettingsSnapshot> {
+  const response = await fetch(PROMPT_STUDIO_SETTINGS_PATH, {
+    method: 'GET',
+    headers: { accept: 'application/json' },
+    cache: 'no-store',
+  })
+  return decodeSettings(await responseValue(response))
 }
 
 async function loadCatalog(): Promise<RuntimePromptCatalog> {
@@ -134,8 +163,6 @@ export class PromptStudioStore {
 
   private generation = 0
 
-  constructor(private readonly api: Pick<IApiClient, 'settings'>) {}
-
   /** Refetch the namespace descriptor and runtime registry; newest request wins. */
   async load(): Promise<void> {
     const generation = ++this.generation
@@ -144,16 +171,12 @@ export class PromptStudioStore {
       state.error = null
     })
     try {
-      const [response, catalog] = await Promise.all([
-        this.api.settings.describe({}),
+      const [settings, catalog] = await Promise.all([
+        loadSettings(),
         loadCatalog(),
       ])
-      if (!response.result.ok) throw new Error(response.result.error.message)
-      const namespace = response.result.value.namespaces.find(row => row.ns === PROMPT_STUDIO_NAMESPACE)
-      if (namespace === undefined) throw new Error('prompt-studio settings namespace is not registered')
-      const config = namespaceFrom(namespace)
       if (generation !== this.generation) return
-      this.accept(namespace, response.result.value.writable, config, catalog)
+      this.accept(settings, catalog)
     } catch (error) {
       if (generation !== this.generation) return
       this.store.update((state) => {
@@ -167,40 +190,33 @@ export class PromptStudioStore {
   async save(components: readonly PromptComponent[], expectedRevision: number): Promise<void> {
     validatePromptComponents(components)
     const generation = ++this.generation
-    const response = await this.api.settings.mutate({
-      ns: PROMPT_STUDIO_NAMESPACE,
-      ops: [
-        {
-          op: 'set',
-          path: ['components'],
-          value: components.map(component => ({ ...component })),
-        },
-      ],
-      expectedRevision,
+    const response = await fetch(PROMPT_STUDIO_SETTINGS_PATH, {
+      method: 'POST',
+      headers: {
+        accept: 'application/json',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        components: components.map(component => ({ ...component })),
+        expectedRevision,
+      }),
     })
-    if (!response.result.ok) throw new Error(response.result.error.message)
+    const settings = decodeSettings(await responseValue(response))
     const catalog = await loadCatalog()
     if (generation !== this.generation) return
-    this.accept(
-      response.result.value,
-      this.store.getSnapshot().writable,
-      namespaceFrom(response.result.value),
-      catalog,
-    )
+    this.accept(settings, catalog)
   }
 
   private accept(
-    namespace: SettingsNamespaceView,
-    writable: boolean,
-    config: StudioConfig,
+    settings: PromptStudioSettingsSnapshot,
     catalog: RuntimePromptCatalog,
   ): void {
     this.store.update((state) => {
       state.status = 'ready'
       state.error = null
-      state.writable = writable
-      state.revision = namespace.revision
-      state.components = config.components
+      state.writable = settings.writable
+      state.revision = settings.revision
+      state.components = settings.value.components
       state.native = catalog.native
       state.assembled = catalog.assembled
       state.catalogRevision = catalog.revision

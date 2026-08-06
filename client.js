@@ -1,5 +1,5 @@
 window.__ModuleLoader__.load({
-	id: "moeblack/prompt-studio",
+	id: "dsh-prompt-studio",
 	factory: (require) => {
 		var module = { exports: {} };
 		var exports = module.exports;
@@ -8,11 +8,10 @@ window.__ModuleLoader__.load({
 		let _deepseek_ai_dsh_client_runtime_client = require("@deepseek-ai/dsh-client-runtime/client");
 		let react = require("react");
 		let react_jsx_runtime = require("react/jsx-runtime");
-		//#region src/shared.ts
-		/** Settings namespace shared by the Host registration and browser editor. */
-		const PROMPT_STUDIO_NAMESPACE = "prompt-studio";
 		/** Same-origin endpoint exposing the runtime-discovered prompt inventory. */
 		const PROMPT_STUDIO_STATE_PATH = "/prompt-studio/state";
+		/** Same-origin endpoint owned by the plugin for its private settings namespace. */
+		const PROMPT_STUDIO_SETTINGS_PATH = "/prompt-studio/settings";
 		/** Namespace reserved for ordered replacement markers owned by the Host half. */
 		const PROMPT_STUDIO_OVERRIDE_MARKER_PREFIX = "prompt-studio:override-marker:";
 		const KINDS$1 = new Set(["native", "supplement"]);
@@ -44,8 +43,14 @@ window.__ModuleLoader__.load({
 			for (const component of components) {
 				validateIdentifier(component.id, "prompt component ids");
 				if (!KINDS$1.has(component.kind)) throw new TypeError(`prompt component "${component.id}" has an invalid kind`);
-				if (!POSITIONS$1.has(component.position)) throw new TypeError(`prompt component "${component.id}" has an invalid position`);
 				if (!ROLES$1.has(component.role)) throw new TypeError(`prompt component "${component.id}" has an invalid role`);
+				if (component.role === "system") {
+					if (component.position !== void 0) throw new TypeError(`system prompt component "${component.id}" cannot define a message position`);
+				} else if (component.position === void 0 || !POSITIONS$1.has(component.position)) throw new TypeError(`message prompt component "${component.id}" has an invalid position`);
+				if (component.blockType !== void 0) {
+					if (component.blockType !== "text" && component.blockType !== "reasoning") throw new TypeError(`prompt component "${component.id}" has an invalid block type`);
+					if (component.role !== "assistant") throw new TypeError(`prompt component "${component.id}" blockType applies only to assistant components`);
+				}
 				if (!Number.isFinite(component.order)) throw new TypeError(`prompt component "${component.id}" order must be a finite number`);
 				if (component.id.startsWith("prompt-studio:override-marker:")) throw new TypeError(`prompt component ids beginning with "${PROMPT_STUDIO_OVERRIDE_MARKER_PREFIX}" are reserved`);
 				if (ids.has(component.id)) throw new TypeError(`prompt component "${component.id}" is listed more than once`);
@@ -53,7 +58,7 @@ window.__ModuleLoader__.load({
 				if (component.kind === "native") {
 					if (!allowNative) throw new TypeError(`native prompt component "${component.id}" cannot be persisted`);
 					if (component.origin !== void 0) throw new TypeError(`native prompt component "${component.id}" cannot override another component`);
-					if (component.position !== "after_system" || component.role !== "system") throw new TypeError(`native prompt component "${component.id}" must use the system role and system position`);
+					if (component.role !== "system") throw new TypeError(`native prompt component "${component.id}" must use the system role`);
 					continue;
 				}
 				if (component.origin === void 0) continue;
@@ -74,15 +79,43 @@ window.__ModuleLoader__.load({
 				return candidate;
 			}
 		}
-		/** Resolve native override targets for a draft system-slot preview. */
+		function escapeAttribute(value) {
+			return value.replaceAll("&", "&amp;").replaceAll("\"", "&quot;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+		}
+		/** Wrap one supplement so its authorship remains visible inside merged content. */
+		function renderSupplementBoundary(id, text) {
+			return `<supplement id="${escapeAttribute(id)}">\n${text}\n</supplement>`;
+		}
+		function systemPreviewComponent(component) {
+			const snapshot = {
+				...component,
+				template: renderSupplementBoundary(component.id, component.template)
+			};
+			delete snapshot.position;
+			return snapshot;
+		}
+		/** Resolve overrides and supplements for a draft of the single system slot. */
 		function buildDraftSystemComponents(native, configured) {
 			validatePromptComponents(native, true);
 			validatePromptComponents(configured);
+			const nativeIds = new Set(native.map((component) => component.id));
 			const overrides = new Map(configured.filter(isNativeOverride).map((component) => [component.origin, component]));
-			return native.flatMap((component) => {
-				if (overrides.get(component.id) === void 0) return component.enabled ? [{ ...component }] : [];
+			const ordered = native.flatMap((component, declaration) => {
+				if (overrides.get(component.id) === void 0) return component.enabled ? [{
+					component: { ...component },
+					declaration
+				}] : [];
 				return [];
-			}).sort((left, right) => left.order - right.order);
+			});
+			for (const [declaration, component] of configured.entries()) {
+				if (!component.enabled || component.role !== "system") continue;
+				if (component.origin !== void 0 && !nativeIds.has(component.origin)) continue;
+				ordered.push({
+					component: systemPreviewComponent(component),
+					declaration: native.length + declaration
+				});
+			}
+			return ordered.sort((left, right) => left.component.order - right.component.order || left.declaration - right.declaration).map((entry) => entry.component);
 		}
 		/** Concatenate enabled system components using the Host renderer's blank-line rule. */
 		function renderSystemPreview(components) {
@@ -124,17 +157,18 @@ window.__ModuleLoader__.load({
 				const kind = candidate["kind"];
 				const position = candidate["position"];
 				const role = candidate["role"];
-				if (typeof candidate["id"] !== "string" || typeof kind !== "string" || !KINDS.has(kind) || typeof position !== "string" || !POSITIONS.has(position) || typeof role !== "string" || !ROLES.has(role) || typeof candidate["order"] !== "number" || typeof candidate["enabled"] !== "boolean" || typeof candidate["template"] !== "string" || candidate["origin"] !== void 0 && typeof candidate["origin"] !== "string") throw new TypeError(`prompt-studio ${label} row ${String(index + 1)} has an invalid shape`);
-				return {
+				if (typeof candidate["id"] !== "string" || typeof kind !== "string" || !KINDS.has(kind) || typeof role !== "string" || !ROLES.has(role) || (role === "system" ? position !== void 0 && position !== "after_system" : typeof position !== "string" || !POSITIONS.has(position)) || typeof candidate["order"] !== "number" || typeof candidate["enabled"] !== "boolean" || typeof candidate["template"] !== "string" || candidate["origin"] !== void 0 && typeof candidate["origin"] !== "string") throw new TypeError(`prompt-studio ${label} row ${String(index + 1)} has an invalid shape`);
+				const component = {
 					id: candidate["id"],
 					kind,
-					position,
 					role,
 					order: candidate["order"],
 					enabled: candidate["enabled"],
 					template: candidate["template"],
 					...candidate["origin"] === void 0 ? {} : { origin: candidate["origin"] }
 				};
+				if (component.role !== "system") component.position = position;
+				return component;
 			});
 			validatePromptComponents(components, allowNative);
 			return components;
@@ -142,9 +176,6 @@ window.__ModuleLoader__.load({
 		function decodeConfig(value) {
 			if (typeof value !== "object" || value === null || Array.isArray(value)) throw new TypeError("prompt-studio settings value is not an object");
 			return { components: decodeComponents(value.components, "components", false) };
-		}
-		function namespaceFrom(response) {
-			return decodeConfig(response.value);
 		}
 		function decodeCatalog(value) {
 			if (typeof value !== "object" || value === null || Array.isArray(value)) throw new TypeError("prompt-studio runtime catalog is not an object");
@@ -155,6 +186,30 @@ window.__ModuleLoader__.load({
 				native: decodeComponents(candidate.native, "native catalog", true),
 				assembled: decodeComponents(candidate.assembled, "assembled catalog", true)
 			};
+		}
+		function decodeSettings(value) {
+			if (typeof value !== "object" || value === null || Array.isArray(value)) throw new TypeError("prompt-studio settings snapshot is not an object");
+			const candidate = value;
+			if (typeof candidate["writable"] !== "boolean") throw new TypeError("prompt-studio settings writable flag is invalid");
+			if (typeof candidate["revision"] !== "number" || !Number.isSafeInteger(candidate["revision"])) throw new TypeError("prompt-studio settings revision is invalid");
+			return {
+				writable: candidate["writable"],
+				revision: candidate["revision"],
+				value: decodeConfig(candidate["value"])
+			};
+		}
+		async function responseValue(response) {
+			const value = await response.json();
+			if (response.ok) return value;
+			const message = typeof value === "object" && value !== null && !Array.isArray(value) ? value["error"] : void 0;
+			throw new Error(typeof message === "string" ? message : `请求失败：HTTP ${String(response.status)}`);
+		}
+		async function loadSettings() {
+			return decodeSettings(await responseValue(await fetch(PROMPT_STUDIO_SETTINGS_PATH, {
+				method: "GET",
+				headers: { accept: "application/json" },
+				cache: "no-store"
+			})));
 		}
 		async function loadCatalog() {
 			const response = await fetch(PROMPT_STUDIO_STATE_PATH, {
@@ -167,7 +222,6 @@ window.__ModuleLoader__.load({
 		}
 		/** One browser-side controller, shared by every session-scoped mount of the view. */
 		var PromptStudioStore = class {
-			api;
 			/** Observable remote namespace state consumed by every mounted Prompt Studio view. */
 			store = (0, _deepseek_ai_dsh_client_runtime_client.createSnapshotStore)({
 				status: "idle",
@@ -180,9 +234,6 @@ window.__ModuleLoader__.load({
 				catalogRevision: 0
 			});
 			generation = 0;
-			constructor(api) {
-				this.api = api;
-			}
 			/** Refetch the namespace descriptor and runtime registry; newest request wins. */
 			async load() {
 				const generation = ++this.generation;
@@ -191,13 +242,9 @@ window.__ModuleLoader__.load({
 					state.error = null;
 				});
 				try {
-					const [response, catalog] = await Promise.all([this.api.settings.describe({}), loadCatalog()]);
-					if (!response.result.ok) throw new Error(response.result.error.message);
-					const namespace = response.result.value.namespaces.find((row) => row.ns === PROMPT_STUDIO_NAMESPACE);
-					if (namespace === void 0) throw new Error("prompt-studio settings namespace is not registered");
-					const config = namespaceFrom(namespace);
+					const [settings, catalog] = await Promise.all([loadSettings(), loadCatalog()]);
 					if (generation !== this.generation) return;
-					this.accept(namespace, response.result.value.writable, config, catalog);
+					this.accept(settings, catalog);
 				} catch (error) {
 					if (generation !== this.generation) return;
 					this.store.update((state) => {
@@ -210,27 +257,28 @@ window.__ModuleLoader__.load({
 			async save(components, expectedRevision) {
 				validatePromptComponents(components);
 				const generation = ++this.generation;
-				const response = await this.api.settings.mutate({
-					ns: PROMPT_STUDIO_NAMESPACE,
-					ops: [{
-						op: "set",
-						path: ["components"],
-						value: components.map((component) => ({ ...component }))
-					}],
-					expectedRevision
-				});
-				if (!response.result.ok) throw new Error(response.result.error.message);
+				const settings = decodeSettings(await responseValue(await fetch(PROMPT_STUDIO_SETTINGS_PATH, {
+					method: "POST",
+					headers: {
+						accept: "application/json",
+						"content-type": "application/json"
+					},
+					body: JSON.stringify({
+						components: components.map((component) => ({ ...component })),
+						expectedRevision
+					})
+				})));
 				const catalog = await loadCatalog();
 				if (generation !== this.generation) return;
-				this.accept(response.result.value, this.store.getSnapshot().writable, namespaceFrom(response.result.value), catalog);
+				this.accept(settings, catalog);
 			}
-			accept(namespace, writable, config, catalog) {
+			accept(settings, catalog) {
 				this.store.update((state) => {
 					state.status = "ready";
 					state.error = null;
-					state.writable = writable;
-					state.revision = namespace.revision;
-					state.components = config.components;
+					state.writable = settings.writable;
+					state.revision = settings.revision;
+					state.components = settings.value.components;
 					state.native = catalog.native;
 					state.assembled = catalog.assembled;
 					state.catalogRevision = catalog.revision;
@@ -244,72 +292,76 @@ window.__ModuleLoader__.load({
 		}
 		//#endregion
 		//#region \0dsh-css:/root/prompt-studio-plugin/src/client/PromptStudioView.module.css.mjs
-		const css = ".Ewsqaa_root{box-sizing:border-box;width:100%;height:100%;min-height:0;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);padding:24px;overflow:auto}.Ewsqaa_pageHeader{justify-content:space-between;align-items:flex-start;gap:20px;max-width:1480px;margin:0 auto 16px;display:flex}.Ewsqaa_title,.Ewsqaa_subtitle,.Ewsqaa_intro,.Ewsqaa_caption,.Ewsqaa_notice,.Ewsqaa_error,.Ewsqaa_empty,.Ewsqaa_excerpt,.Ewsqaa_emptyText,.Ewsqaa_origin,.Ewsqaa_builtinText{margin:0}.Ewsqaa_title{font-size:22px;font-weight:600;line-height:30px}.Ewsqaa_intro{max-width:760px;color:var(--dsw-alias-label-tertiary);margin-top:4px;font-size:14px;line-height:22px}.Ewsqaa_headerActions{flex-wrap:wrap;flex:none;justify-content:flex-end;gap:8px;display:flex}.Ewsqaa_primaryButton,.Ewsqaa_secondaryButton,.Ewsqaa_textButton,.Ewsqaa_dangerButton{box-sizing:border-box;font:inherit;cursor:pointer;border:0}.Ewsqaa_primaryButton,.Ewsqaa_secondaryButton{border-radius:18px;justify-content:center;align-items:center;height:36px;padding:0 14px;font-size:14px;line-height:22px;display:inline-flex}.Ewsqaa_primaryButton{color:var(--dsw-alias-label-primary-foreground);background:var(--dsw-alias-button-primary-fill)}.Ewsqaa_primaryButton:hover:not(:disabled){background:var(--dsw-alias-button-primary-hover)}.Ewsqaa_secondaryButton{border:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-primary);background:0 0}.Ewsqaa_secondaryButton:hover:not(:disabled),.Ewsqaa_textButton:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}.Ewsqaa_primaryButton:disabled,.Ewsqaa_secondaryButton:disabled,.Ewsqaa_textButton:disabled,.Ewsqaa_dangerButton:disabled{cursor:default;opacity:.4}.Ewsqaa_primaryButton:focus-visible,.Ewsqaa_secondaryButton:focus-visible,.Ewsqaa_textButton:focus-visible,.Ewsqaa_dangerButton:focus-visible,.Ewsqaa_input:focus-visible,.Ewsqaa_orderInput:focus-visible,.Ewsqaa_select:focus-visible,.Ewsqaa_textarea:focus-visible,.Ewsqaa_builtinsSummary:focus-visible{box-shadow:0 0 0 2px var(--dsw-alias-border-l3);outline:none}.Ewsqaa_notice,.Ewsqaa_error{max-width:1480px;margin:0 auto 10px;font-size:12px;line-height:18px}.Ewsqaa_notice{color:var(--dsw-alias-state-warn-label)}.Ewsqaa_error{color:var(--dsw-alias-state-error-primary)}.Ewsqaa_status{box-sizing:border-box;width:100%;height:100%;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-layer-1);flex-direction:column;align-items:flex-start;gap:12px;padding:24px;display:flex}.Ewsqaa_status .Ewsqaa_error{margin:0}.Ewsqaa_columns{grid-template-columns:minmax(440px,1fr) minmax(400px,1fr);align-items:start;gap:18px;max-width:1480px;margin:0 auto;display:grid}.Ewsqaa_editorColumn,.Ewsqaa_previewColumn{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);border-radius:14px;min-width:0;padding:16px}.Ewsqaa_previewColumn{position:sticky;top:0}.Ewsqaa_sectionHeading{justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:14px;display:flex}.Ewsqaa_subtitle{font-size:16px;font-weight:500;line-height:24px}.Ewsqaa_caption,.Ewsqaa_origin,.Ewsqaa_emptyText{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}.Ewsqaa_count,.Ewsqaa_orderBadge,.Ewsqaa_stateBadge,.Ewsqaa_kindBadge,.Ewsqaa_positionBadge,.Ewsqaa_roleBadge{color:var(--dsw-alias-label-tertiary);flex:none;font-size:12px;line-height:18px}.Ewsqaa_empty{color:var(--dsw-alias-label-tertiary);background:var(--dsw-alias-bg-module-platform);border-radius:10px;padding:18px;font-size:14px;line-height:22px}.Ewsqaa_componentList,.Ewsqaa_userList,.Ewsqaa_builtinList{flex-direction:column;gap:8px;margin:0;padding:0;list-style:none;display:flex}.Ewsqaa_componentCard,.Ewsqaa_userCard,.Ewsqaa_builtinCard{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;padding:12px}.Ewsqaa_rowHeader{align-items:center;gap:8px;min-width:0;display:flex}.Ewsqaa_enabledControl{color:var(--dsw-alias-label-secondary);flex:none;align-items:center;gap:5px;font-size:12px;line-height:18px;display:inline-flex}.Ewsqaa_enabledControl input{accent-color:var(--dsw-alias-brand-primary)}.Ewsqaa_sectionName{min-width:0;color:var(--dsw-alias-label-primary);text-overflow:ellipsis;white-space:nowrap;font-size:14px;font-weight:500;line-height:22px;overflow:hidden}.Ewsqaa_orderBadge{margin-left:auto}.Ewsqaa_kindBadge,.Ewsqaa_positionBadge,.Ewsqaa_roleBadge,.Ewsqaa_stateBadge{background:var(--dsw-alias-bg-module-platform);border-radius:9px;padding:1px 6px}.Ewsqaa_kindBadge{color:var(--dsw-alias-label-secondary)}.Ewsqaa_textButton,.Ewsqaa_dangerButton{height:28px;color:var(--dsw-alias-label-secondary);background:0 0;border-radius:14px;flex:none;padding:0 9px;font-size:12px;line-height:18px}.Ewsqaa_dangerButton{color:var(--dsw-alias-state-error-primary)}.Ewsqaa_dangerButton:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover-danger)}.Ewsqaa_componentEditor,.Ewsqaa_sectionEditor{background:var(--dsw-alias-bg-module-platform);border-radius:10px;grid-template-columns:minmax(0,1fr) 120px minmax(150px,.6fr);gap:10px;margin-top:12px;padding:12px;display:grid}.Ewsqaa_field{flex-direction:column;gap:5px;display:flex}.Ewsqaa_templateField,.Ewsqaa_textField,.Ewsqaa_builtinTextField{grid-column:1/-1}.Ewsqaa_fieldLabel{color:var(--dsw-alias-label-secondary);font-size:12px;font-weight:500;line-height:18px}.Ewsqaa_input,.Ewsqaa_orderInput,.Ewsqaa_select,.Ewsqaa_textarea{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);width:100%;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);font:inherit;border-radius:8px;font-size:13px}.Ewsqaa_input,.Ewsqaa_orderInput,.Ewsqaa_select{height:32px;padding:0 9px}.Ewsqaa_textarea{resize:vertical;min-height:150px;padding:9px;line-height:20px}.Ewsqaa_input:disabled,.Ewsqaa_orderInput:disabled,.Ewsqaa_select:disabled,.Ewsqaa_textarea:disabled{cursor:default;opacity:.6}.Ewsqaa_excerpt,.Ewsqaa_builtinText{color:var(--dsw-alias-label-secondary);white-space:pre-wrap;margin-top:9px;font-size:12px;line-height:18px}.Ewsqaa_excerpt{-webkit-line-clamp:3;-webkit-box-orient:vertical;display:-webkit-box;overflow:hidden}.Ewsqaa_emptyText{margin-top:9px}.Ewsqaa_builtins{border-top:1px solid var(--dsw-alias-border-l2);margin-top:14px;padding-top:14px}.Ewsqaa_builtinsSummary{width:fit-content;color:var(--dsw-alias-label-secondary);cursor:pointer;border-radius:6px;align-items:center;gap:8px;font-size:14px;font-weight:500;line-height:22px;display:flex}.Ewsqaa_builtinsSummary .Ewsqaa_count{margin-left:4px}.Ewsqaa_builtinList{margin-top:10px}.Ewsqaa_builtinCard{background:var(--dsw-alias-bg-module-platform)}.Ewsqaa_origin{margin-top:5px}.Ewsqaa_assemblyOrder{background:var(--dsw-alias-bg-module-platform);border-radius:10px;flex-direction:column;gap:2px;max-height:190px;margin-bottom:12px;padding:8px;display:flex;overflow:auto}.Ewsqaa_assemblyOrder,.Ewsqaa_preview{--dsh-scrollbar-thumb:var(--dsw-alias-scrollbar-bg-l2);--dsh-scrollbar-thumb-hover:var(--dsw-alias-scrollbar-hover-l2)}.Ewsqaa_assemblyRow{min-height:24px;color:var(--dsw-alias-label-secondary);grid-template-columns:24px minmax(0,1fr) auto;align-items:center;gap:7px;font-size:12px;line-height:18px;display:grid}.Ewsqaa_assemblyIndex,.Ewsqaa_assemblyOrderValue{color:var(--dsw-alias-label-tertiary)}.Ewsqaa_preview{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);width:100%;min-height:320px;max-height:calc(100vh - 380px);color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-module-platform);white-space:pre-wrap;overflow-wrap:anywhere;border-radius:10px;margin:0;padding:14px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:19px;overflow:auto}@media (width<=1000px){.Ewsqaa_columns{grid-template-columns:1fr}.Ewsqaa_previewColumn{position:static}.Ewsqaa_preview{max-height:520px}}@media (width<=680px){.Ewsqaa_root{padding:16px}.Ewsqaa_pageHeader{flex-direction:column}.Ewsqaa_headerActions{width:100%}.Ewsqaa_primaryButton,.Ewsqaa_secondaryButton{flex:1}.Ewsqaa_rowHeader{flex-wrap:wrap}.Ewsqaa_sectionName{flex-basis:100%;order:-1}.Ewsqaa_orderBadge{margin-left:0}.Ewsqaa_componentEditor,.Ewsqaa_sectionEditor{grid-template-columns:1fr}.Ewsqaa_templateField,.Ewsqaa_textField,.Ewsqaa_builtinTextField{grid-column:auto}}";
-		const tagId = "moeblack/prompt-studio/PromptStudioView.module.css";
+		const css = ".Ewsqaa_root{box-sizing:border-box;width:100%;height:100%;min-height:0;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);padding:24px;overflow:auto}.Ewsqaa_pageHeader{justify-content:space-between;align-items:flex-start;gap:20px;max-width:1480px;margin:0 auto 16px;display:flex}.Ewsqaa_title,.Ewsqaa_subtitle,.Ewsqaa_intro,.Ewsqaa_caption,.Ewsqaa_notice,.Ewsqaa_error,.Ewsqaa_empty,.Ewsqaa_excerpt,.Ewsqaa_emptyText,.Ewsqaa_origin,.Ewsqaa_builtinText{margin:0}.Ewsqaa_title{font-size:22px;font-weight:600;line-height:30px}.Ewsqaa_intro{max-width:760px;color:var(--dsw-alias-label-tertiary);margin-top:4px;font-size:14px;line-height:22px}.Ewsqaa_headerActions{flex-wrap:wrap;flex:none;justify-content:flex-end;gap:8px;display:flex}.Ewsqaa_primaryButton,.Ewsqaa_secondaryButton,.Ewsqaa_textButton,.Ewsqaa_dangerButton{box-sizing:border-box;font:inherit;cursor:pointer;border:0}.Ewsqaa_primaryButton,.Ewsqaa_secondaryButton{border-radius:18px;justify-content:center;align-items:center;height:36px;padding:0 14px;font-size:14px;line-height:22px;display:inline-flex}.Ewsqaa_primaryButton{color:var(--dsw-alias-label-primary-foreground);background:var(--dsw-alias-button-primary-fill)}.Ewsqaa_primaryButton:hover:not(:disabled){background:var(--dsw-alias-button-primary-hover)}.Ewsqaa_secondaryButton{border:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-primary);background:0 0}.Ewsqaa_secondaryButton:hover:not(:disabled),.Ewsqaa_textButton:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}.Ewsqaa_primaryButton:disabled,.Ewsqaa_secondaryButton:disabled,.Ewsqaa_textButton:disabled,.Ewsqaa_dangerButton:disabled{cursor:default;opacity:.4}.Ewsqaa_primaryButton:focus-visible,.Ewsqaa_secondaryButton:focus-visible,.Ewsqaa_textButton:focus-visible,.Ewsqaa_dangerButton:focus-visible,.Ewsqaa_input:focus-visible,.Ewsqaa_orderInput:focus-visible,.Ewsqaa_select:focus-visible,.Ewsqaa_textarea:focus-visible,.Ewsqaa_builtinsSummary:focus-visible{box-shadow:0 0 0 2px var(--dsw-alias-border-l3);outline:none}.Ewsqaa_notice,.Ewsqaa_error{max-width:1480px;margin:0 auto 10px;font-size:12px;line-height:18px}.Ewsqaa_notice{color:var(--dsw-alias-state-warn-label)}.Ewsqaa_error{color:var(--dsw-alias-state-error-primary)}.Ewsqaa_status{box-sizing:border-box;width:100%;height:100%;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-layer-1);flex-direction:column;align-items:flex-start;gap:12px;padding:24px;display:flex}.Ewsqaa_status .Ewsqaa_error{margin:0}.Ewsqaa_columns{grid-template-columns:minmax(440px,1fr) minmax(400px,1fr);align-items:start;gap:18px;max-width:1480px;margin:0 auto;display:grid}.Ewsqaa_editorColumn,.Ewsqaa_previewColumn{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);border-radius:14px;min-width:0;padding:16px}.Ewsqaa_previewColumn{position:sticky;top:0}.Ewsqaa_sectionHeading{justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:14px;display:flex}.Ewsqaa_subtitle{font-size:16px;font-weight:500;line-height:24px}.Ewsqaa_caption,.Ewsqaa_origin,.Ewsqaa_emptyText{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}.Ewsqaa_count,.Ewsqaa_orderBadge,.Ewsqaa_stateBadge,.Ewsqaa_kindBadge,.Ewsqaa_positionBadge,.Ewsqaa_roleBadge{color:var(--dsw-alias-label-tertiary);flex:none;font-size:12px;line-height:18px}.Ewsqaa_empty{color:var(--dsw-alias-label-tertiary);background:var(--dsw-alias-bg-module-platform);border-radius:10px;padding:18px;font-size:14px;line-height:22px}.Ewsqaa_componentList,.Ewsqaa_userList,.Ewsqaa_builtinList{flex-direction:column;gap:8px;margin:0;padding:0;list-style:none;display:flex}.Ewsqaa_componentCard,.Ewsqaa_userCard,.Ewsqaa_builtinCard{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;padding:12px}.Ewsqaa_rowHeader{align-items:center;gap:8px;min-width:0;display:flex}.Ewsqaa_enabledControl{color:var(--dsw-alias-label-secondary);flex:none;align-items:center;gap:5px;font-size:12px;line-height:18px;display:inline-flex}.Ewsqaa_enabledControl input{accent-color:var(--dsw-alias-brand-primary)}.Ewsqaa_sectionName{min-width:0;color:var(--dsw-alias-label-primary);text-overflow:ellipsis;white-space:nowrap;font-size:14px;font-weight:500;line-height:22px;overflow:hidden}.Ewsqaa_orderBadge{margin-left:auto}.Ewsqaa_kindBadge,.Ewsqaa_positionBadge,.Ewsqaa_roleBadge,.Ewsqaa_stateBadge{background:var(--dsw-alias-bg-module-platform);border-radius:9px;padding:1px 6px}.Ewsqaa_kindBadge{color:var(--dsw-alias-label-secondary)}.Ewsqaa_textButton,.Ewsqaa_dangerButton{height:28px;color:var(--dsw-alias-label-secondary);background:0 0;border-radius:14px;flex:none;padding:0 9px;font-size:12px;line-height:18px}.Ewsqaa_dangerButton{color:var(--dsw-alias-state-error-primary)}.Ewsqaa_dangerButton:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover-danger)}.Ewsqaa_componentEditor,.Ewsqaa_sectionEditor{background:var(--dsw-alias-bg-module-platform);border-radius:10px;grid-template-columns:minmax(0,1fr) 120px minmax(150px,.6fr);gap:10px;margin-top:12px;padding:12px;display:grid}.Ewsqaa_field{flex-direction:column;gap:5px;display:flex}.Ewsqaa_templateField,.Ewsqaa_textField,.Ewsqaa_builtinTextField{grid-column:1/-1}.Ewsqaa_fieldLabel{color:var(--dsw-alias-label-secondary);font-size:12px;font-weight:500;line-height:18px}.Ewsqaa_input,.Ewsqaa_orderInput,.Ewsqaa_select,.Ewsqaa_textarea{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);width:100%;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);font:inherit;border-radius:8px;font-size:13px}.Ewsqaa_input,.Ewsqaa_orderInput,.Ewsqaa_select{height:32px;padding:0 9px}.Ewsqaa_textarea{resize:vertical;min-height:150px;padding:9px;line-height:20px}.Ewsqaa_input:disabled,.Ewsqaa_orderInput:disabled,.Ewsqaa_select:disabled,.Ewsqaa_textarea:disabled{cursor:default;opacity:.6}.Ewsqaa_excerpt,.Ewsqaa_builtinText{color:var(--dsw-alias-label-secondary);white-space:pre-wrap;margin-top:9px;font-size:12px;line-height:18px}.Ewsqaa_excerpt{-webkit-line-clamp:3;-webkit-box-orient:vertical;display:-webkit-box;overflow:hidden}.Ewsqaa_emptyText{margin-top:9px}.Ewsqaa_builtins{border-top:1px solid var(--dsw-alias-border-l2);margin-top:14px;padding-top:14px}.Ewsqaa_builtinsSummary{width:fit-content;color:var(--dsw-alias-label-secondary);cursor:pointer;border-radius:6px;align-items:center;gap:8px;font-size:14px;font-weight:500;line-height:22px;display:flex}.Ewsqaa_builtinsSummary .Ewsqaa_count{margin-left:4px}.Ewsqaa_builtinList{margin-top:10px}.Ewsqaa_builtinCard{background:var(--dsw-alias-bg-module-platform)}.Ewsqaa_origin{margin-top:5px}.Ewsqaa_assemblyOrder{background:var(--dsw-alias-bg-module-platform);border-radius:10px;flex-direction:column;gap:2px;max-height:190px;margin-bottom:12px;padding:8px;display:flex;overflow:auto}.Ewsqaa_assemblyOrder,.Ewsqaa_preview{--dsh-scrollbar-thumb:var(--dsw-alias-scrollbar-bg-l2);--dsh-scrollbar-thumb-hover:var(--dsw-alias-scrollbar-hover-l2)}.Ewsqaa_assemblyRow{min-height:24px;color:var(--dsw-alias-label-secondary);grid-template-columns:24px minmax(0,1fr) auto;align-items:center;gap:7px;font-size:12px;line-height:18px;display:grid}.Ewsqaa_assemblyIndex,.Ewsqaa_assemblyOrderValue{color:var(--dsw-alias-label-tertiary)}.Ewsqaa_preview{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);width:100%;min-height:320px;max-height:calc(100vh - 380px);color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-module-platform);white-space:pre-wrap;overflow-wrap:anywhere;border-radius:10px;margin:0;padding:14px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:19px;overflow:auto}@media (width<=1000px){.Ewsqaa_columns{grid-template-columns:1fr}.Ewsqaa_previewColumn{position:static}.Ewsqaa_preview{max-height:520px}}@media (width<=680px){.Ewsqaa_root{padding:16px}.Ewsqaa_pageHeader{flex-direction:column}.Ewsqaa_headerActions{width:100%}.Ewsqaa_primaryButton,.Ewsqaa_secondaryButton{flex:1}.Ewsqaa_rowHeader{flex-wrap:wrap}.Ewsqaa_sectionName{flex-basis:100%;order:-1}.Ewsqaa_orderBadge{margin-left:0}.Ewsqaa_componentEditor,.Ewsqaa_sectionEditor{grid-template-columns:1fr}.Ewsqaa_templateField,.Ewsqaa_textField,.Ewsqaa_builtinTextField{grid-column:auto}}.Ewsqaa_previewSystem{white-space:pre-wrap;overflow-wrap:anywhere;margin:0;padding:0}.Ewsqaa_previewSupplement{border:1px solid var(--dsw-alias-border-l2);border-left:3px solid var(--dsw-alias-accent-primary,#4a7dff);background:var(--dsw-alias-bg-module-hover,#7f7f7f14);border-radius:6px;margin:8px 0 0;padding:8px 10px}.Ewsqaa_previewSupplementTag{color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-module-hover,#7f7f7f24);border-radius:4px;margin-bottom:4px;padding:0 6px;font-size:11px;line-height:18px;display:inline-block}.Ewsqaa_previewSupplementText{white-space:pre-wrap;overflow-wrap:anywhere;margin:0}";
+		const tagId = "dsh-prompt-studio/PromptStudioView.module.css";
 		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId) + "]") === null) {
 			const tag = document.createElement("style");
-			tag.dataset.plugin = "moeblack/prompt-studio";
+			tag.dataset.plugin = "dsh-prompt-studio";
 			tag.dataset.pluginCss = tagId;
 			tag.textContent = css;
 			document.head.appendChild(tag);
 		}
 		var PromptStudioView_module_css_default = {
-			"stateBadge": "Ewsqaa_stateBadge",
-			"roleBadge": "Ewsqaa_roleBadge",
 			"dangerButton": "Ewsqaa_dangerButton",
-			"editorColumn": "Ewsqaa_editorColumn",
-			"sectionName": "Ewsqaa_sectionName",
-			"componentCard": "Ewsqaa_componentCard",
-			"count": "Ewsqaa_count",
-			"textField": "Ewsqaa_textField",
+			"kindBadge": "Ewsqaa_kindBadge",
+			"previewSupplementTag": "Ewsqaa_previewSupplementTag",
+			"intro": "Ewsqaa_intro",
+			"input": "Ewsqaa_input",
 			"sectionEditor": "Ewsqaa_sectionEditor",
-			"builtinsSummary": "Ewsqaa_builtinsSummary",
+			"assemblyOrderValue": "Ewsqaa_assemblyOrderValue",
+			"orderBadge": "Ewsqaa_orderBadge",
+			"caption": "Ewsqaa_caption",
+			"origin": "Ewsqaa_origin",
+			"rowHeader": "Ewsqaa_rowHeader",
+			"empty": "Ewsqaa_empty",
+			"fieldLabel": "Ewsqaa_fieldLabel",
+			"builtins": "Ewsqaa_builtins",
+			"assemblyIndex": "Ewsqaa_assemblyIndex",
+			"pageHeader": "Ewsqaa_pageHeader",
+			"templateField": "Ewsqaa_templateField",
+			"componentList": "Ewsqaa_componentList",
+			"previewSupplementText": "Ewsqaa_previewSupplementText",
+			"textButton": "Ewsqaa_textButton",
+			"orderInput": "Ewsqaa_orderInput",
+			"primaryButton": "Ewsqaa_primaryButton",
+			"previewSupplement": "Ewsqaa_previewSupplement",
+			"stateBadge": "Ewsqaa_stateBadge",
+			"textarea": "Ewsqaa_textarea",
 			"field": "Ewsqaa_field",
 			"error": "Ewsqaa_error",
-			"title": "Ewsqaa_title",
-			"secondaryButton": "Ewsqaa_secondaryButton",
-			"componentEditor": "Ewsqaa_componentEditor",
-			"assemblyOrder": "Ewsqaa_assemblyOrder",
-			"preview": "Ewsqaa_preview",
-			"orderBadge": "Ewsqaa_orderBadge",
-			"assemblyIndex": "Ewsqaa_assemblyIndex",
-			"templateField": "Ewsqaa_templateField",
-			"input": "Ewsqaa_input",
-			"assemblyRow": "Ewsqaa_assemblyRow",
-			"caption": "Ewsqaa_caption",
-			"builtinTextField": "Ewsqaa_builtinTextField",
-			"pageHeader": "Ewsqaa_pageHeader",
-			"assemblyOrderValue": "Ewsqaa_assemblyOrderValue",
-			"subtitle": "Ewsqaa_subtitle",
-			"previewColumn": "Ewsqaa_previewColumn",
-			"textButton": "Ewsqaa_textButton",
-			"positionBadge": "Ewsqaa_positionBadge",
 			"userCard": "Ewsqaa_userCard",
-			"textarea": "Ewsqaa_textarea",
-			"empty": "Ewsqaa_empty",
-			"emptyText": "Ewsqaa_emptyText",
-			"headerActions": "Ewsqaa_headerActions",
-			"kindBadge": "Ewsqaa_kindBadge",
-			"componentList": "Ewsqaa_componentList",
-			"orderInput": "Ewsqaa_orderInput",
-			"sectionHeading": "Ewsqaa_sectionHeading",
-			"builtinList": "Ewsqaa_builtinList",
-			"primaryButton": "Ewsqaa_primaryButton",
-			"origin": "Ewsqaa_origin",
-			"select": "Ewsqaa_select",
 			"columns": "Ewsqaa_columns",
-			"notice": "Ewsqaa_notice",
-			"excerpt": "Ewsqaa_excerpt",
-			"userList": "Ewsqaa_userList",
+			"positionBadge": "Ewsqaa_positionBadge",
+			"select": "Ewsqaa_select",
+			"previewColumn": "Ewsqaa_previewColumn",
+			"sectionName": "Ewsqaa_sectionName",
+			"roleBadge": "Ewsqaa_roleBadge",
+			"secondaryButton": "Ewsqaa_secondaryButton",
+			"sectionHeading": "Ewsqaa_sectionHeading",
 			"builtinCard": "Ewsqaa_builtinCard",
-			"enabledControl": "Ewsqaa_enabledControl",
-			"fieldLabel": "Ewsqaa_fieldLabel",
-			"builtinText": "Ewsqaa_builtinText",
 			"root": "Ewsqaa_root",
-			"rowHeader": "Ewsqaa_rowHeader",
-			"intro": "Ewsqaa_intro",
+			"builtinTextField": "Ewsqaa_builtinTextField",
+			"componentCard": "Ewsqaa_componentCard",
+			"userList": "Ewsqaa_userList",
+			"enabledControl": "Ewsqaa_enabledControl",
 			"status": "Ewsqaa_status",
-			"builtins": "Ewsqaa_builtins"
+			"componentEditor": "Ewsqaa_componentEditor",
+			"previewSystem": "Ewsqaa_previewSystem",
+			"subtitle": "Ewsqaa_subtitle",
+			"preview": "Ewsqaa_preview",
+			"builtinText": "Ewsqaa_builtinText",
+			"emptyText": "Ewsqaa_emptyText",
+			"textField": "Ewsqaa_textField",
+			"title": "Ewsqaa_title",
+			"headerActions": "Ewsqaa_headerActions",
+			"assemblyRow": "Ewsqaa_assemblyRow",
+			"editorColumn": "Ewsqaa_editorColumn",
+			"count": "Ewsqaa_count",
+			"assemblyOrder": "Ewsqaa_assemblyOrder",
+			"notice": "Ewsqaa_notice",
+			"builtinsSummary": "Ewsqaa_builtinsSummary",
+			"builtinList": "Ewsqaa_builtinList",
+			"excerpt": "Ewsqaa_excerpt"
 		};
 		//#endregion
 		//#region src/client/PromptStudioView.tsx
@@ -340,21 +392,40 @@ window.__ModuleLoader__.load({
 			return error instanceof Error ? error.message : String(error);
 		}
 		function compareRows(left, right) {
-			return POSITION_ORDER[left.component.position] - POSITION_ORDER[right.component.position] || left.component.order - right.component.order;
+			return (left.component.role === "system" ? -1 : POSITION_ORDER[left.component.position ?? "tail"]) - (right.component.role === "system" ? -1 : POSITION_ORDER[right.component.position ?? "tail"]) || left.component.order - right.component.order;
 		}
-		function previewText(system, supplements) {
+		function previewText(systemText, supplements) {
 			const blocks = [];
-			const systemText = renderSystemPreview(system);
-			if (systemText.length > 0) blocks.push(`[system]\n${systemText}`);
+			if (systemText.length > 0) blocks.push({
+				kind: "system",
+				text: systemText
+			});
 			const sortedSupplements = supplements.map((component, declaration) => ({
 				component,
 				declaration
-			})).sort((left, right) => POSITION_ORDER[left.component.position] - POSITION_ORDER[right.component.position] || left.component.order - right.component.order || left.declaration - right.declaration);
-			for (const { component } of sortedSupplements) blocks.push(`[${POSITION_LABEL[component.position]} · ${component.role} · ${component.id}]\n${component.template}`);
-			return blocks.join("\n\n");
+			})).sort((left, right) => POSITION_ORDER[left.component.position ?? "tail"] - POSITION_ORDER[right.component.position ?? "tail"] || left.component.order - right.component.order || left.declaration - right.declaration);
+			for (const { component } of sortedSupplements) blocks.push({
+				kind: "supplement",
+				id: component.id,
+				text: component.template
+			});
+			return blocks;
 		}
 		/** Conversation-view entry point. */
 		function PromptStudioView({ controller, useSnapshot }) {
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(PromptStudioSurface, {
+				controller,
+				useSnapshot
+			});
+		}
+		/** Settings-page entry point sharing the exact live editor state. */
+		function PromptStudioSettingsSection({ controller, useSnapshot }) {
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(PromptStudioSurface, {
+				controller,
+				useSnapshot
+			});
+		}
+		function PromptStudioSurface({ controller, useSnapshot }) {
 			const remote = useSnapshot((state) => state);
 			(0, react.useEffect)(() => {
 				if (remote.status === "idle") controller.load();
@@ -414,9 +485,14 @@ window.__ModuleLoader__.load({
 			]);
 			const requestSupplements = (0, react.useMemo)(() => {
 				const nativeIds = new Set(remote.native.map((component) => component.id));
-				return draft.filter((component) => component.enabled && (!isNativeOverride(component) || nativeIds.has(component.origin)));
+				return draft.filter((component) => component.enabled && component.role !== "system" && (!isNativeOverride(component) || nativeIds.has(component.origin)));
 			}, [draft, remote.native]);
-			const preview = (0, react.useMemo)(() => previewText(draftSystem, requestSupplements), [draftSystem, requestSupplements]);
+			const orderedRequestSupplements = (0, react.useMemo)(() => requestSupplements.map((component, declaration) => ({
+				component,
+				declaration
+			})).sort((left, right) => POSITION_ORDER[left.component.position ?? "tail"] - POSITION_ORDER[right.component.position ?? "tail"] || left.component.order - right.component.order || left.declaration - right.declaration).map((entry) => entry.component), [requestSupplements]);
+			const systemContent = (0, react.useMemo)(() => renderSystemPreview(draftSystem), [draftSystem]);
+			const preview = (0, react.useMemo)(() => previewText(systemContent, orderedRequestSupplements), [orderedRequestSupplements, systemContent]);
 			const changeComponent = (index, patch) => {
 				setDraft((current) => current.map((component, position) => position === index ? {
 					...component,
@@ -431,6 +507,21 @@ window.__ModuleLoader__.load({
 					const next = { ...component };
 					if (origin.length === 0) delete next.origin;
 					else next.origin = origin;
+					return next;
+				}));
+				setDirty(true);
+				setSaveError(null);
+			};
+			const changeRole = (index, role) => {
+				setDraft((current) => current.map((component, position) => {
+					if (position !== index) return component;
+					const next = {
+						...component,
+						role
+					};
+					if (role === "system") delete next.position;
+					else next.position ??= "after_system";
+					if (role !== "assistant") delete next.blockType;
 					return next;
 				}));
 				setDirty(true);
@@ -463,7 +554,6 @@ window.__ModuleLoader__.load({
 					const next = [...current, {
 						id: nextOverrideId(current, native.id),
 						kind: "supplement",
-						position: "after_system",
 						role: "system",
 						order: native.order,
 						enabled: true,
@@ -500,13 +590,10 @@ window.__ModuleLoader__.load({
 				children: [
 					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 						className: PromptStudioView_module_css_default["pageHeader"],
-						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("h1", {
+						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", { children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("h1", {
 							className: PromptStudioView_module_css_default["title"],
 							children: "Prompt Studio"
-						}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
-							className: PromptStudioView_module_css_default["intro"],
-							children: "统一编排只读原生组件与可编辑补充组件；角色、位置和原生覆盖目标彼此独立。"
-						})] }), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+						}) }), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 							className: PromptStudioView_module_css_default["headerActions"],
 							children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
 								type: "button",
@@ -542,13 +629,10 @@ window.__ModuleLoader__.load({
 							"aria-label": "统一提示词组件",
 							children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 								className: PromptStudioView_module_css_default["sectionHeading"],
-								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("h2", {
+								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", { children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("h2", {
 									className: PromptStudioView_module_css_default["subtitle"],
 									children: "组件"
-								}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
-									className: PromptStudioView_module_css_default["caption"],
-									children: "原生组件来自运行时组装快照；补充组件保存后由统一效果管线撤销并重施加。"
-								})] }), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+								}) }), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 									className: PromptStudioView_module_css_default["count"],
 									children: String(rows.length)
 								})]
@@ -587,7 +671,7 @@ window.__ModuleLoader__.load({
 														className: PromptStudioView_module_css_default["sectionName"],
 														children: component.id
 													}),
-													/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+													component.position === void 0 ? null : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 														className: PromptStudioView_module_css_default["positionBadge"],
 														children: POSITION_LABEL[component.position]
 													}),
@@ -597,7 +681,11 @@ window.__ModuleLoader__.load({
 													}),
 													/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
 														className: PromptStudioView_module_css_default["orderBadge"],
-														children: ["顺序 ", String(component.order)]
+														children: [
+															component.role === "system" ? "层级" : "间隙内顺序",
+															" ",
+															String(component.order)
+														]
 													}),
 													isNative ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
 														type: "button",
@@ -650,7 +738,7 @@ window.__ModuleLoader__.load({
 														className: PromptStudioView_module_css_default["field"],
 														children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 															className: PromptStudioView_module_css_default["fieldLabel"],
-															children: "顺序"
+															children: component.role === "system" ? "系统层级" : "间隙内顺序"
 														}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("input", {
 															className: PromptStudioView_module_css_default["orderInput"],
 															type: "number",
@@ -661,11 +749,11 @@ window.__ModuleLoader__.load({
 															}
 														})]
 													}),
-													/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("label", {
+													component.role === "system" ? null : /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("label", {
 														className: PromptStudioView_module_css_default["field"],
 														children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 															className: PromptStudioView_module_css_default["fieldLabel"],
-															children: "位置"
+															children: "消息间隙"
 														}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("select", {
 															className: PromptStudioView_module_css_default["select"],
 															value: component.position,
@@ -689,7 +777,7 @@ window.__ModuleLoader__.load({
 															value: component.role,
 															disabled: !remote.writable,
 															onChange: (event) => {
-																changeComponent(configuredIndex, { role: event.target.value });
+																changeRole(configuredIndex, event.target.value);
 															},
 															children: Object.entries(ROLE_LABEL).map(([value, label]) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("option", {
 																value,
@@ -697,6 +785,27 @@ window.__ModuleLoader__.load({
 															}, value))
 														})]
 													}),
+													component.role === "assistant" ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("label", {
+														className: PromptStudioView_module_css_default["field"],
+														children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+															className: PromptStudioView_module_css_default["fieldLabel"],
+															children: "块类型"
+														}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("select", {
+															className: PromptStudioView_module_css_default["select"],
+															value: component.blockType ?? "text",
+															disabled: !remote.writable,
+															onChange: (event) => {
+																changeComponent(configuredIndex, { blockType: event.target.value });
+															},
+															children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("option", {
+																value: "text",
+																children: "文本"
+															}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("option", {
+																value: "reasoning",
+																children: "思考"
+															})]
+														})]
+													}) : null,
 													/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("label", {
 														className: PromptStudioView_module_css_default["field"],
 														children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
@@ -748,62 +857,59 @@ window.__ModuleLoader__.load({
 							children: [
 								/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 									className: PromptStudioView_module_css_default["sectionHeading"],
-									children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("h2", {
+									children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", { children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("h2", {
 										className: PromptStudioView_module_css_default["subtitle"],
 										children: "完整预览"
-									}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("p", {
-										className: PromptStudioView_module_css_default["caption"],
-										children: [
-											"未解析模板；",
-											"{{user_input}}",
-											"、",
-											"{{model}}",
-											" 与 ",
-											"{{cwd}}",
-											" 在每次组装时读取当前会话。"
-										]
-									})] }), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
+									}) }), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 										className: PromptStudioView_module_css_default["count"],
-										children: [String(draftSystem.length + requestSupplements.length), " 项"]
+										children: String((systemContent.length > 0 ? 1 : 0) + orderedRequestSupplements.length)
 									})]
 								}),
 								/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 									className: PromptStudioView_module_css_default["assemblyOrder"],
-									children: [draftSystem.map((component, index) => /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
+									children: [systemContent.length > 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
 										className: PromptStudioView_module_css_default["assemblyRow"],
 										children: [
 											/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 												className: PromptStudioView_module_css_default["assemblyIndex"],
-												children: String(index + 1)
+												children: "1"
 											}),
-											/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: component.id }),
-											/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-												className: PromptStudioView_module_css_default["assemblyOrderValue"],
-												children: KIND_LABEL[component.kind]
-											})
-										]
-									}, `system:${component.kind}:${component.id}:${String(index)}`)), requestSupplements.map((component) => /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
-										className: PromptStudioView_module_css_default["assemblyRow"],
-										children: [
-											/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-												className: PromptStudioView_module_css_default["assemblyIndex"],
-												children: "＋"
-											}),
-											/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: component.id }),
+											/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: "system" }),
 											/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
 												className: PromptStudioView_module_css_default["assemblyOrderValue"],
-												children: [
-													POSITION_LABEL[component.position],
-													" · ",
-													component.role
-												]
+												children: [String(draftSystem.length), " 个 section 合并"]
+											})
+										]
+									}) : null, orderedRequestSupplements.map((component, index) => /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
+										className: PromptStudioView_module_css_default["assemblyRow"],
+										children: [
+											/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+												className: PromptStudioView_module_css_default["assemblyIndex"],
+												children: String(index + (systemContent.length > 0 ? 2 : 1))
+											}),
+											/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: component.role }),
+											/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+												className: PromptStudioView_module_css_default["assemblyOrderValue"],
+												children: component.position === void 0 ? "" : POSITION_LABEL[component.position]
 											})
 										]
 									}, `supplement:${component.id}`))]
 								}),
-								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("pre", {
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 									className: PromptStudioView_module_css_default["preview"],
-									children: preview
+									children: preview.map((block, index) => block.kind === "system" ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("pre", {
+										className: PromptStudioView_module_css_default["previewSystem"],
+										children: block.text
+									}, `system:${index}`) : /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+										className: PromptStudioView_module_css_default["previewSupplement"],
+										children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+											className: PromptStudioView_module_css_default["previewSupplementTag"],
+											children: "补充"
+										}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("pre", {
+											className: PromptStudioView_module_css_default["previewSupplementText"],
+											children: block.text
+										})]
+									}, `supplement:${block.id}:${index}`))
 								})
 							]
 						})]
@@ -821,8 +927,12 @@ window.__ModuleLoader__.load({
 		];
 		/** Register the tab, its shared controller, and pushed invalidations. */
 		function apply(ctx) {
-			const controller = new PromptStudioStore(ctx.get("connection").api);
+			const controller = new PromptStudioStore();
 			const useSnapshot = (0, _deepseek_ai_dsh_client_web_react.bindSnapshotSelector)(controller.store);
+			const injected = () => ({
+				controller,
+				useSnapshot
+			});
 			ctx.effect(() => {
 				const refresh = () => {
 					refreshIfLoaded(controller);
@@ -839,11 +949,15 @@ window.__ModuleLoader__.load({
 				id: "prompt-studio",
 				order: 20,
 				label: "Prompt Studio",
-				inject: () => ({
-					controller,
-					useSnapshot
-				})
+				inject: injected
 			}, PromptStudioView);
+			ctx.slots.inject("settings.section", () => ctx.slots.register({
+				name: "settings.section",
+				id: "prompt-studio",
+				order: 20,
+				label: "Prompt Studio",
+				inject: injected
+			}, PromptStudioSettingsSection));
 		}
 		//#endregion
 		exports.apply = apply;

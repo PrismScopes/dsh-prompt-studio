@@ -1,7 +1,7 @@
 /** Unified prompt-component editor and request-layout preview. */
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import type { ConvViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
-import type { InjectFace } from '@deepseek-ai/dsh-client-ui-slots'
+import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { SnapshotSelectorHook } from '@deepseek-ai/dsh-client-web-react'
 import {
   DEFAULT_SUPPLEMENT_ORDER,
@@ -26,6 +26,10 @@ export interface PromptStudioViewInjected {
 
 /** Full conversation-view props after the injected face is composed. */
 export type PromptStudioViewProps = ConvViewProps & InjectFace<PromptStudioViewInjected>
+
+/** Settings-page props over the same controller and editor surface. */
+export type PromptStudioSettingsSectionProps =
+  PropsRuntime<'settings.section'> & InjectFace<PromptStudioViewInjected>
 
 interface DisplayRow {
   component: PromptComponent
@@ -96,6 +100,18 @@ function previewText(systemText: string, supplements: readonly PromptComponent[]
 
 /** Conversation-view entry point. */
 export function PromptStudioView({ controller, useSnapshot }: PromptStudioViewProps): ReactNode {
+  return <PromptStudioSurface controller={controller} useSnapshot={useSnapshot} />
+}
+
+/** Settings-page entry point sharing the exact live editor state. */
+export function PromptStudioSettingsSection({
+  controller,
+  useSnapshot,
+}: PromptStudioSettingsSectionProps): ReactNode {
+  return <PromptStudioSurface controller={controller} useSnapshot={useSnapshot} />
+}
+
+function PromptStudioSurface({ controller, useSnapshot }: InjectFace<PromptStudioViewInjected>): ReactNode {
   const remote = useSnapshot(state => state)
 
   useEffect(() => {
