@@ -35,6 +35,8 @@ export interface PromptComponent {
   template: string
   /** Native target id when this supplement overrides a runtime component. */
   origin?: string
+  /** Assistant supplements: render as a reasoning or text block. Defaults to text. */
+  blockType?: 'text' | 'reasoning'
 }
 
 /** Resolved value of the prompt-studio settings namespace. */
@@ -88,6 +90,14 @@ export function validatePromptComponents(
       }
     } else if (component.position === undefined || !POSITIONS.has(component.position)) {
       throw new TypeError(`message prompt component "${component.id}" has an invalid position`)
+    }
+    if (component.blockType !== undefined) {
+      if (component.blockType !== 'text' && component.blockType !== 'reasoning') {
+        throw new TypeError(`prompt component "${component.id}" has an invalid block type`)
+      }
+      if (component.role !== 'assistant') {
+        throw new TypeError(`prompt component "${component.id}" blockType applies only to assistant components`)
+      }
     }
     if (!Number.isFinite(component.order)) {
       throw new TypeError(`prompt component "${component.id}" order must be a finite number`)

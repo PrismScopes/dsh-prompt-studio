@@ -9,7 +9,6 @@ import {
   isNativeOverride,
   nextOverrideId,
   nextSupplementId,
-  renderSupplementBoundary,
   renderSystemPreview,
   type PromptComponent,
   type PromptComponentKind,
@@ -75,18 +74,24 @@ function compareRows(left: DisplayRow, right: DisplayRow): number {
     || left.component.order - right.component.order
 }
 
-function previewText(systemText: string, supplements: readonly PromptComponent[]): string {
-  const blocks: string[] = []
-  if (systemText.length > 0) blocks.push(systemText)
+interface PreviewBlock {
+  kind: 'system' | 'supplement'
+  id?: string
+  text: string
+}
+
+function previewText(systemText: string, supplements: readonly PromptComponent[]): PreviewBlock[] {
+  const blocks: PreviewBlock[] = []
+  if (systemText.length > 0) blocks.push({ kind: 'system', text: systemText })
   const sortedSupplements = supplements
     .map((component, declaration) => ({ component, declaration }))
     .sort((left, right) => POSITION_ORDER[left.component.position ?? 'tail'] - POSITION_ORDER[right.component.position ?? 'tail']
       || left.component.order - right.component.order
       || left.declaration - right.declaration)
   for (const { component } of sortedSupplements) {
-    blocks.push(renderSupplementBoundary(component.id, component.template))
+    blocks.push({ kind: 'supplement', id: component.id, text: component.template })
   }
-  return blocks.join('\n\n')
+  return blocks
 }
 
 /** Conversation-view entry point. */
@@ -187,6 +192,7 @@ function PromptStudioEditor({
       const next: PromptComponent = { ...component, role }
       if (role === 'system') delete next.position
       else next.position ??= 'after_system'
+      if (role !== 'assistant') delete next.blockType
       return next
     }))
     setDirty(true)
@@ -258,9 +264,7 @@ function PromptStudioEditor({
       <div className={styles['pageHeader']}>
         <div>
           <h1 className={styles['title']}>Prompt Studio</h1>
-          <p className={styles['intro']}>
-            角色决定内容归宿；system 合并进唯一系统区，user/assistant 再由位置决定消息间隙。
-          </p>
+
         </div>
         <div className={styles['headerActions']}>
           <button type="button" className={styles['secondaryButton']} disabled={!remote.writable} onClick={addSupplement}>
@@ -286,7 +290,7 @@ function PromptStudioEditor({
           <div className={styles['sectionHeading']}>
             <div>
               <h2 className={styles['subtitle']}>组件</h2>
-              <p className={styles['caption']}>原生组件来自运行时组装快照；补充组件保存后由统一效果管线撤销并重施加。</p>
+
             </div>
             <span className={styles['count']}>{String(rows.length)}</span>
           </div>
@@ -412,6 +416,22 @@ function PromptStudioEditor({
                             ))}
                           </select>
                         </label>
+                        {component.role === 'assistant'
+                          ? (
+                            <label className={styles['field']}>
+                              <span className={styles['fieldLabel']}>块类型</span>
+                              <select
+                                className={styles['select']}
+                                value={component.blockType ?? 'text'}
+                                disabled={!remote.writable}
+                                onChange={(event) => { changeComponent(configuredIndex, { blockType: event.target.value as 'text' | 'reasoning' }) }}
+                              >
+                                <option value="text">文本</option>
+                                <option value="reasoning">思考</option>
+                              </select>
+                            </label>
+                          )
+                          : null}
                         <label className={styles['field']}>
                           <span className={styles['fieldLabel']}>覆盖目标</span>
                           <select
@@ -447,12 +467,10 @@ function PromptStudioEditor({
           <div className={styles['sectionHeading']}>
             <div>
               <h2 className={styles['subtitle']}>完整预览</h2>
-              <p className={styles['caption']}>
-                下方仅显示模型可见内容，不加入位置、角色或标识标签；模板变量在每次组装时读取当前会话。
-              </p>
+
             </div>
             <span className={styles['count']}>
-              {String((systemContent.length > 0 ? 1 : 0) + orderedRequestSupplements.length)} 段
+              {String((systemContent.length > 0 ? 1 : 0) + orderedRequestSupplements.length)}
             </span>
           </div>
           <div className={styles['assemblyOrder']}>
@@ -477,7 +495,18 @@ function PromptStudioEditor({
               </span>
             ))}
           </div>
-          <pre className={styles['preview']}>{preview}</pre>
+          <div className={styles['preview']}>
+            {preview.map((block, index) => (
+              block.kind === 'system'
+                ? <pre key={`system:${index}`} className={styles['previewSystem']}>{block.text}</pre>
+                : (
+                  <div key={`supplement:${block.id}:${index}`} className={styles['previewSupplement']}>
+                    <span className={styles['previewSupplementTag']}>补充</span>
+                    <pre className={styles['previewSupplementText']}>{block.text}</pre>
+                  </div>
+                )
+            ))}
+          </div>
         </section>
       </div>
     </div>

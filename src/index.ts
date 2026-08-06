@@ -2,6 +2,7 @@
 import type { Context } from 'cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {
+  ContentBlock,
   GenerateOptions,
   Message,
   StreamChunk,
@@ -309,6 +310,7 @@ interface PlannedSupplement {
   role: Exclude<PromptComponent['role'], 'system'>
   order: number
   text: string
+  blockType: NonNullable<PromptComponent['blockType']>
   declaration: number
 }
 
@@ -326,6 +328,7 @@ class SupplementPlans {
         role: component.role,
         order: component.order,
         text: renderComponentTemplate(component, agent),
+        blockType: component.blockType ?? 'text',
         declaration,
       }]
     })
@@ -347,14 +350,18 @@ class SupplementPlans {
   }
 }
 
+function supplementBlock(supplement: PlannedSupplement): ContentBlock {
+  const text = renderSupplementBoundary(supplement.id, supplement.text)
+  return Object.freeze(supplement.blockType === 'reasoning'
+    ? { type: 'reasoning' as const, text }
+    : { type: 'text' as const, text })
+}
+
 function supplementalMessage(supplement: PlannedSupplement): Message {
   return Object.freeze({
     id: crypto.randomUUID(),
     role: supplement.role,
-    content: Object.freeze([Object.freeze({
-      type: 'text' as const,
-      text: renderSupplementBoundary(supplement.id, supplement.text),
-    })]),
+    content: Object.freeze([supplementBlock(supplement)]),
     source: Object.freeze({ kind: 'plugin' as const, plugin: REQUEST_SOURCE }),
   }) as Message
 }
@@ -369,13 +376,14 @@ function supplementsAt(
 }
 
 function mergeSupplementAfter(message: Message, supplement: PlannedSupplement): Message {
-  const boundary = renderSupplementBoundary(supplement.id, supplement.text)
+  const block = supplementBlock(supplement)
+  const text = (block as { text?: string }).text ?? ''
+  const withBoundary = block.type === 'reasoning'
+    ? block
+    : Object.freeze({ type: 'text' as const, text: `\n\n${text}` })
   return Object.freeze({
     ...message,
-    content: Object.freeze([
-      ...message.content,
-      Object.freeze({ type: 'text' as const, text: `\n\n${boundary}` }),
-    ]),
+    content: Object.freeze([...message.content, withBoundary]),
   }) as Message
 }
 

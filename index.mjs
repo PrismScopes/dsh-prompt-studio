@@ -834,6 +834,10 @@ function validatePromptComponents(components, allowNative = false) {
 		if (component.role === "system") {
 			if (component.position !== void 0) throw new TypeError(`system prompt component "${component.id}" cannot define a message position`);
 		} else if (component.position === void 0 || !POSITIONS.has(component.position)) throw new TypeError(`message prompt component "${component.id}" has an invalid position`);
+		if (component.blockType !== void 0) {
+			if (component.blockType !== "text" && component.blockType !== "reasoning") throw new TypeError(`prompt component "${component.id}" has an invalid block type`);
+			if (component.role !== "assistant") throw new TypeError(`prompt component "${component.id}" blockType applies only to assistant components`);
+		}
 		if (!Number.isFinite(component.order)) throw new TypeError(`prompt component "${component.id}" order must be a finite number`);
 		if (component.id.startsWith("prompt-studio:override-marker:")) throw new TypeError(`prompt component ids beginning with "${PROMPT_STUDIO_OVERRIDE_MARKER_PREFIX}" are reserved`);
 		if (ids.has(component.id)) throw new TypeError(`prompt component "${component.id}" is listed more than once`);
@@ -1160,6 +1164,7 @@ var SupplementPlans = class {
 				role: component.role,
 				order: component.order,
 				text: renderComponentTemplate(component, agent),
+				blockType: component.blockType ?? "text",
 				declaration
 			}];
 		});
@@ -1178,14 +1183,21 @@ var SupplementPlans = class {
 		this.bySession.clear();
 	}
 };
+function supplementBlock(supplement) {
+	const text = renderSupplementBoundary(supplement.id, supplement.text);
+	return Object.freeze(supplement.blockType === "reasoning" ? {
+		type: "reasoning",
+		text
+	} : {
+		type: "text",
+		text
+	});
+}
 function supplementalMessage(supplement) {
 	return Object.freeze({
 		id: crypto.randomUUID(),
 		role: supplement.role,
-		content: Object.freeze([Object.freeze({
-			type: "text",
-			text: renderSupplementBoundary(supplement.id, supplement.text)
-		})]),
+		content: Object.freeze([supplementBlock(supplement)]),
 		source: Object.freeze({
 			kind: "plugin",
 			plugin: REQUEST_SOURCE
@@ -1196,13 +1208,15 @@ function supplementsAt(plan, position) {
 	return plan.filter((item) => item.position === position).sort((left, right) => left.order - right.order || left.declaration - right.declaration);
 }
 function mergeSupplementAfter(message, supplement) {
-	const boundary = renderSupplementBoundary(supplement.id, supplement.text);
+	const block = supplementBlock(supplement);
+	const text = block.text ?? "";
+	const withBoundary = block.type === "reasoning" ? block : Object.freeze({
+		type: "text",
+		text: `\n\n${text}`
+	});
 	return Object.freeze({
 		...message,
-		content: Object.freeze([...message.content, Object.freeze({
-			type: "text",
-			text: `\n\n${boundary}`
-		})])
+		content: Object.freeze([...message.content, withBoundary])
 	});
 }
 function supplementalGroups(plan) {
