@@ -1,131 +1,96 @@
-import { describe, expect, it } from 'vitest'
-import type {
-  RpcResponse,
-  SettingsNamespaceView,
-} from '@deepseek-ai/dsh-client-connection/client'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { PromptStudioStore } from '../src/client/store.ts'
-import type { BuiltinSectionOverride, StudioSection } from '../src/shared.ts'
 
-let rpcId = 0
-function ok<T>(value: T): RpcResponse<T> {
-  return { rpcId: `prompt-${String(rpcId++)}` as never, result: { ok: true, value } }
+const settings = {
+  writable: true,
+  revision: 3,
+  value: { components: [] },
 }
 
-function fail<T>(message: string): RpcResponse<T> {
-  return {
-    rpcId: `prompt-${String(rpcId++)}` as never,
-    result: { ok: false, error: { code: 'settings-rejected', message, details: { ns: 'prompt-studio' } } },
-  }
-}
-
-const USER_SECTION: StudioSection = {
-  name: 'user:instructions',
-  order: 200,
+const captured = {
+  id: 'captured:m1',
+  kind: 'captured',
+  role: 'user',
+  order: 1,
   enabled: true,
-  text: 'Be concise.',
+  template: 'Instructions',
+  messageId: 'm1',
+  sourceKind: 'workspace-instructions',
+  producer: 'workspace-instructions',
+  form: 'instructions',
+  source: { kind: 'workspace-instructions', form: 'instructions', changes: [] },
+  resources: [],
 }
 
-const BUILTIN_OVERRIDE: BuiltinSectionOverride = {
-  name: 'tool:grep',
-  order: 104,
-  enabled: false,
-  text: 'Use the grep tool — not shell grep or rg — to search file contents. Use read on a matched file when you need surrounding context.',
+const catalog = {
+  revision: 4,
+  native: [],
+  assembled: [],
+  sessionId: 'session-a',
+  captured: [captured],
+  layout: { messageCount: 2, userAnchor: 0 },
 }
 
-function namespace(
-  sections: StudioSection[],
-  overrides: BuiltinSectionOverride[] = [],
-  revision = 3,
-): SettingsNamespaceView {
-  return {
-    ns: 'prompt-studio',
-    schema: {},
-    value: { sections, overrides },
-    applies: 'live',
-    secrets: [],
-    revision,
-  }
+function json(value: unknown, status = 200): Response {
+  return new Response(JSON.stringify(value), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  })
 }
+
+afterEach(() => { vi.unstubAllGlobals() })
 
 describe('PromptStudioStore', () => {
-  it('loads the registered namespace and provider writability', async () => {
-    const api = {
-      settings: {
-        describe: () => Promise.resolve(ok({ writable: true, hasDocument: true, namespaces: [namespace([USER_SECTION], [BUILTIN_OVERRIDE])] })),
-      },
-    }
-    const controller = new PromptStudioStore(api as never)
+  it('loads settings and the session-specific automatic capture catalog', async () => {
+    const requests: string[] = []
+    vi.stubGlobal('fetch', vi.fn((input: string | URL | Request) => {
+      const path = String(input)
+      requests.push(path)
+      return Promise.resolve(path.startsWith('/prompt-studio/settings') ? json(settings) : json(catalog))
+    }))
+    const controller = new PromptStudioStore('session-a')
     await controller.load()
-    expect(controller.store.getSnapshot()).toEqual({
+    expect(requests).toContain('/prompt-studio/state?sessionId=session-a')
+    expect(controller.store.getSnapshot()).toMatchObject({
       status: 'ready',
-      error: null,
       writable: true,
       revision: 3,
-      sections: [USER_SECTION],
-      overrides: [BUILTIN_OVERRIDE],
+      capturedSessionId: 'session-a',
+      captured: [{ producer: 'workspace-instructions', form: 'instructions' }],
+      messageCount: 2,
+      userAnchor: 0,
     })
   })
 
-  it('writes user sections and built-in overrides atomically with the descriptor revision', async () => {
-    const requests: unknown[] = []
-    const changed = { ...USER_SECTION, text: 'Be exact.' }
-    const api = {
-      settings: {
-        describe: () => Promise.resolve(ok({ writable: true, hasDocument: false, namespaces: [namespace([USER_SECTION])] })),
-        mutate: (request: unknown) => {
-          requests.push(request)
-          return Promise.resolve(ok(namespace([changed], [BUILTIN_OVERRIDE], 4)))
-        },
-      },
-    }
-    const controller = new PromptStudioStore(api as never)
+  it('routes captured file reads and writes through the resource endpoint', async () => {
+    const bodies: unknown[] = []
+    vi.stubGlobal('fetch', vi.fn((input: string | URL | Request, init?: RequestInit) => {
+      const path = String(input)
+      if (path.startsWith('/prompt-studio/settings')) return Promise.resolve(json(settings))
+      if (path.startsWith('/prompt-studio/state')) return Promise.resolve(json(catalog))
+      if (init?.method === 'POST') {
+        bodies.push(JSON.parse(String(init.body)) as unknown)
+        return Promise.resolve(json({ path: 'AGENTS.md', content: 'after', digest: 'new' }))
+      }
+      return Promise.resolve(json({ path: 'AGENTS.md', content: 'before', digest: 'old' }))
+    }))
+    const controller = new PromptStudioStore('session-a')
     await controller.load()
-    await controller.save({ sections: [changed], overrides: [BUILTIN_OVERRIDE] }, 3)
-    expect(requests).toEqual([{
-      ns: 'prompt-studio',
-      ops: [
-        { op: 'set', path: ['sections'], value: [changed] },
-        { op: 'set', path: ['overrides'], value: [BUILTIN_OVERRIDE] },
-      ],
-      expectedRevision: 3,
+    expect(await controller.loadResource('captured:m1', 'resource:0')).toMatchObject({ content: 'before' })
+    await controller.saveResource('captured:m1', 'resource:0', 'after', 'old')
+    expect(bodies).toEqual([{
+      sessionId: 'session-a',
+      componentId: 'captured:m1',
+      resourceId: 'resource:0',
+      content: 'after',
+      expectedDigest: 'old',
     }])
-    expect(controller.store.getSnapshot()).toMatchObject({
-      revision: 4,
-      sections: [changed],
-      overrides: [BUILTIN_OVERRIDE],
-    })
   })
 
-  it('loads an older namespace with no overrides field as an empty override list', async () => {
-    const legacy = { ...namespace([USER_SECTION]), value: { sections: [USER_SECTION] } }
-    const controller = new PromptStudioStore({
-      settings: {
-        describe: () => Promise.resolve(ok({ writable: true, hasDocument: true, namespaces: [legacy] })),
-      },
-    } as never)
+  it('surfaces endpoint errors', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(json({ error: 'stale editor' }, 409))))
+    const controller = new PromptStudioStore('session-a')
     await controller.load()
-    expect(controller.store.getSnapshot().overrides).toEqual([])
-  })
-
-  it('surfaces missing namespaces and rejected writes', async () => {
-    const missing = new PromptStudioStore({
-      settings: {
-        describe: () => Promise.resolve(ok({ writable: true, hasDocument: false, namespaces: [] })),
-      },
-    } as never)
-    await missing.load()
-    expect(missing.store.getSnapshot()).toMatchObject({
-      status: 'error',
-      error: 'prompt-studio settings namespace is not registered',
-    })
-
-    const rejected = new PromptStudioStore({
-      settings: {
-        describe: () => Promise.resolve(ok({ writable: true, hasDocument: false, namespaces: [namespace([])] })),
-        mutate: () => Promise.resolve(fail('stale editor')),
-      },
-    } as never)
-    await rejected.load()
-    await expect(rejected.save({ sections: [USER_SECTION], overrides: [] }, 3)).rejects.toThrow('stale editor')
+    expect(controller.store.getSnapshot()).toMatchObject({ status: 'error', error: 'stale editor' })
   })
 })

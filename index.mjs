@@ -1,3 +1,7 @@
+import { createHash } from "node:crypto";
+import { homedir } from "node:os";
+import { readFile, writeFile } from "node:fs/promises";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 //#region ../dsh-2026/vendor/cosmokit/src/misc.ts
 /** Return true when a value is `null` or `undefined`. */
 function isNullable(value) {
@@ -797,12 +801,16 @@ const PROMPT_STUDIO_NAMESPACE = "prompt-studio";
 const PROMPT_STUDIO_STATE_PATH = "/prompt-studio/state";
 /** Same-origin endpoint owned by the plugin for its private settings namespace. */
 const PROMPT_STUDIO_SETTINGS_PATH = "/prompt-studio/settings";
+/** Same-origin endpoint for resources declared by captured context producers. */
+const PROMPT_STUDIO_RESOURCE_PATH = "/prompt-studio/resource";
 /** Conversation-view placement: Chat is 0 and Trajectory is 10. */
 const PROMPT_STUDIO_VIEW_ORDER = 20;
 /** Initial order assigned to a newly added supplement. */
 const DEFAULT_SUPPLEMENT_ORDER = 100;
 /** Namespace reserved for ordered replacement markers owned by the Host half. */
 const PROMPT_STUDIO_OVERRIDE_MARKER_PREFIX = "prompt-studio:override-marker:";
+/** Producer id used by Prompt Studio's own request-local messages. */
+const PROMPT_STUDIO_MESSAGE_SOURCE = "moeblack/prompt-studio";
 const KINDS = new Set(["native", "supplement"]);
 const POSITIONS = new Set([
 	"after_system",
@@ -936,6 +944,7 @@ const roleSchema = Schema.union([
 	Schema.const("user"),
 	Schema.const("assistant")
 ]);
+const blockTypeSchema = Schema.union([Schema.const("text"), Schema.const("reasoning")]);
 const componentSchema = Schema.object({
 	id: Schema.string().min(1),
 	kind: kindSchema,
@@ -944,7 +953,8 @@ const componentSchema = Schema.object({
 	order: finiteOrder,
 	enabled: Schema.boolean().default(true),
 	template: Schema.string(),
-	origin: Schema.string().min(1).default(void 0)
+	origin: Schema.string().min(1).default(void 0),
+	blockType: blockTypeSchema.default(void 0)
 });
 const uniqueComponents = Schema.transform(Schema.array(componentSchema), (components) => {
 	const normalized = components.map((component) => {
@@ -960,6 +970,169 @@ const uniqueComponents = Schema.transform(Schema.array(componentSchema), (compon
 /** Persisted settings schema. Only user-authored supplements are stored. */
 const studioConfigSchema = Schema.object({ components: uniqueComponents.default([]) });
 //#endregion
+//#region src/capture.ts
+const CONVERSATION_SOURCE_KINDS = new Set([
+	"user",
+	"model",
+	"tool"
+]);
+function sourceRecord(message) {
+	return structuredClone(message.source);
+}
+function blockText(block) {
+	const record = block;
+	if ((block.type === "text" || block.type === "reasoning") && typeof record["text"] === "string") return record["text"];
+	return JSON.stringify(block, null, 2);
+}
+function renderMessageContent(message) {
+	return message.content.map(blockText).join("\n\n");
+}
+function instructionResources(source) {
+	if (source["form"] !== "instructions" || !Array.isArray(source["changes"])) return [];
+	const resources = [];
+	for (const change of source["changes"]) {
+		if (typeof change !== "object" || change === null || Array.isArray(change)) continue;
+		const record = change;
+		const action = record["action"];
+		const path = record["path"];
+		const digest = record["digest"];
+		if (action !== "set" && action !== "replace" && action !== "remove" || typeof path !== "string") continue;
+		resources.push({
+			id: `resource:${String(resources.length)}`,
+			path,
+			action,
+			...typeof digest === "string" ? { digest } : {},
+			editable: action !== "remove" && typeof digest === "string"
+		});
+	}
+	return resources;
+}
+/** Whether a request message is producer-owned context rather than conversation. */
+function isInjectedContextMessage(message) {
+	const source = message.source;
+	const kind = source["kind"];
+	if (typeof kind !== "string" || CONVERSATION_SOURCE_KINDS.has(kind)) return false;
+	return !(kind === "plugin" && source["plugin"] === "moeblack/prompt-studio");
+}
+/** Capture every producer-owned context message without knowing its plugin kind in advance. */
+function captureInjectedMessages(messages) {
+	return messages.flatMap((message, order) => {
+		if (!isInjectedContextMessage(message)) return [];
+		const source = sourceRecord(message);
+		const sourceKind = String(source["kind"]);
+		const plugin = source["plugin"];
+		const form = source["form"];
+		const summary = source["summary"];
+		return [{
+			id: `captured:${String(message.id)}`,
+			kind: "captured",
+			role: message.role,
+			order,
+			enabled: true,
+			template: renderMessageContent(message),
+			messageId: String(message.id),
+			sourceKind,
+			producer: sourceKind === "plugin" && typeof plugin === "string" ? plugin : sourceKind,
+			...typeof form === "string" ? { form } : {},
+			...typeof summary === "string" ? { summary } : {},
+			source,
+			resources: instructionResources(source)
+		}];
+	});
+}
+/** Describe the unmodified request gaps used by supplement placement. */
+function requestLayout(messages) {
+	let userAnchor = null;
+	for (let index = messages.length - 1; index >= 0; index -= 1) {
+		const message = messages[index];
+		if (message?.role === "user" && message.source.kind === "user") {
+			userAnchor = index;
+			break;
+		}
+	}
+	return {
+		messageCount: messages.length,
+		userAnchor
+	};
+}
+//#endregion
+//#region src/resource.ts
+/** Resolution and exact replacement of source-declared instruction files. */
+var CapturedResourceNotFoundError = class extends Error {};
+var CapturedResourceConflictError = class extends Error {};
+function sha1(content) {
+	return createHash("sha1").update(content).digest("hex");
+}
+function ancestorDirectories(cwd) {
+	const directories = [];
+	let current = resolve(cwd);
+	for (;;) {
+		directories.push(current);
+		const parent = dirname(current);
+		if (parent === current) return directories;
+		current = parent;
+	}
+}
+function fixedPath(displayPath) {
+	if (isAbsolute(displayPath)) return resolve(displayPath);
+	if (displayPath.startsWith("$DSH_HOME/")) {
+		const dshHome = process.env["DSH_HOME"];
+		return dshHome === void 0 ? void 0 : join(dshHome, displayPath.slice(10));
+	}
+	if (displayPath.startsWith("~/.dsh/")) return join(homedir(), ".dsh", displayPath.slice(7));
+}
+async function readable(path) {
+	try {
+		const content = await readFile(path, "utf8");
+		return {
+			path,
+			content,
+			digest: sha1(content)
+		};
+	} catch {
+		return;
+	}
+}
+function isReadableFile(file) {
+	return file !== void 0;
+}
+async function resolveResource(cwd, resource) {
+	const fixed = fixedPath(resource.path);
+	if (fixed !== void 0) {
+		const file = await readable(fixed);
+		if (file !== void 0) return file;
+		throw new CapturedResourceNotFoundError(`上下文文件不存在或不可读：${resource.path}`);
+	}
+	const candidates = ancestorDirectories(cwd).map((directory) => resolve(directory, resource.path));
+	const readableCandidates = (await Promise.all(candidates.map(readable))).filter(isReadableFile);
+	const matching = resource.digest === void 0 ? [] : readableCandidates.filter((file) => file.digest === resource.digest);
+	if (matching.length === 1) return matching[0];
+	if (matching.length > 1) throw new CapturedResourceConflictError(`上下文文件路径不唯一：${resource.path}`);
+	if (readableCandidates.length === 1) return readableCandidates[0];
+	if (readableCandidates.length > 1) throw new CapturedResourceConflictError(`上下文文件已变化且路径不唯一：${resource.path}`);
+	throw new CapturedResourceNotFoundError(`无法从会话工作目录解析上下文文件：${resource.path}`);
+}
+/** Load the exact current file selected by one captured instructions transition. */
+async function loadCapturedResource(cwd, resource) {
+	const file = await resolveResource(cwd, resource);
+	return {
+		path: resource.path,
+		content: file.content,
+		digest: file.digest
+	};
+}
+/** Replace the source file only if it still has the bytes loaded by the editor. */
+async function saveCapturedResource(cwd, resource, content, expectedDigest) {
+	const current = await resolveResource(cwd, resource);
+	if (current.digest !== expectedDigest) throw new CapturedResourceConflictError(`上下文文件已在编辑期间变化：${resource.path}`);
+	await writeFile(current.path, content, "utf8");
+	return {
+		path: resource.path,
+		content,
+		digest: sha1(content)
+	};
+}
+//#endregion
 //#region src/index.ts
 /** Branded Host settings key. */
 const PROMPT_STUDIO_SETTINGS_NAMESPACE = PROMPT_STUDIO_NAMESPACE;
@@ -969,9 +1142,9 @@ const name = "client-ui-prompt-studio";
 const inject = [
 	"settings",
 	"systemPrompt",
-	"llm"
+	"llm",
+	"sessions"
 ];
-const REQUEST_SOURCE = "moeblack/prompt-studio";
 const SYSTEM_SECTION_PREFIX = "prompt-studio:supplement-section:";
 function markerName(target) {
 	return `${PROMPT_STUDIO_OVERRIDE_MARKER_PREFIX}${target}`;
@@ -1114,6 +1287,8 @@ var RuntimeCatalogStore = class {
 	revision = 0;
 	native = [];
 	assembled = [];
+	requests = /* @__PURE__ */ new Map();
+	latestSessionId;
 	commit(native, assembled) {
 		const nextNative = native.map(cloneComponent);
 		const nextAssembled = assembled.map(cloneComponent);
@@ -1122,12 +1297,35 @@ var RuntimeCatalogStore = class {
 		this.assembled = nextAssembled;
 		this.revision += 1;
 	}
-	snapshot() {
+	commitRequest(sessionId, messages) {
+		const next = {
+			captured: captureInjectedMessages(messages),
+			layout: requestLayout(messages)
+		};
+		const previous = this.requests.get(sessionId);
+		this.latestSessionId = sessionId;
+		if (previous !== void 0 && JSON.stringify(previous) === JSON.stringify(next)) return;
+		this.requests.set(sessionId, structuredClone(next));
+		this.revision += 1;
+	}
+	snapshot(requestedSessionId) {
+		const sessionId = requestedSessionId ?? this.latestSessionId;
+		const request = sessionId === void 0 ? void 0 : this.requests.get(sessionId);
 		return {
 			revision: this.revision,
 			native: this.native.map(cloneComponent),
-			assembled: this.assembled.map(cloneComponent)
+			assembled: this.assembled.map(cloneComponent),
+			...sessionId === void 0 ? {} : { sessionId },
+			captured: request === void 0 ? [] : structuredClone(request.captured),
+			layout: request === void 0 ? {
+				messageCount: 0,
+				userAnchor: null
+			} : { ...request.layout }
 		};
+	}
+	capturedResource(sessionId, componentId, resourceId) {
+		const resource = (this.requests.get(sessionId)?.captured.find((item) => item.id === componentId))?.resources.find((item) => item.id === resourceId);
+		return resource === void 0 ? void 0 : { ...resource };
 	}
 };
 function latestUserInput(agent) {
@@ -1202,7 +1400,7 @@ function supplementalMessage(supplement) {
 		content: Object.freeze([supplementBlock(supplement)]),
 		source: Object.freeze({
 			kind: "plugin",
-			plugin: REQUEST_SOURCE
+			plugin: PROMPT_STUDIO_MESSAGE_SOURCE
 		})
 	});
 }
@@ -1281,8 +1479,9 @@ function insertSupplements(nativeMessages, plan) {
 	}
 	return insertGap(insertGap([], anchor < 0 ? [...nativeMessages] : insertGap(nativeMessages.slice(0, anchor + 1), nativeMessages.slice(anchor + 1), anchored), afterSystem), [], tail);
 }
-function rewriteRequest(ctx, plans, options, next) {
+function rewriteRequest(ctx, plans, catalog, options, next) {
 	if (!(options.sessionId !== void 0 && options.purpose === void 0 && Object.isFrozen(options) && Object.isFrozen(options.messages)) || options.sessionId === void 0) return next();
+	catalog.commitRequest(String(options.sessionId), options.messages);
 	const plan = plans.take(String(options.sessionId));
 	if (plan === void 0) return next();
 	const messages = insertSupplements(options.messages, plan);
@@ -1319,6 +1518,52 @@ function requestJson(request) {
 		request.on("error", reject);
 	});
 }
+function requestUrl(request) {
+	return new URL(request.url ?? "/", "http://prompt-studio.local");
+}
+function requiredString(value, name) {
+	if (typeof value !== "string" || value.length === 0) throw new TypeError(`${name} 必须是非空字符串。`);
+	return value;
+}
+function requiredText(value, name) {
+	if (typeof value !== "string") throw new TypeError(`${name} 必须是字符串。`);
+	return value;
+}
+function resourceSelectionFromUrl(request) {
+	const params = requestUrl(request).searchParams;
+	return {
+		sessionId: requiredString(params.get("sessionId"), "sessionId"),
+		componentId: requiredString(params.get("componentId"), "componentId"),
+		resourceId: requiredString(params.get("resourceId"), "resourceId")
+	};
+}
+function resourceUpdate(value) {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new TypeError("请求体必须是 JSON 对象。");
+	const record = value;
+	return {
+		sessionId: requiredString(record["sessionId"], "sessionId"),
+		componentId: requiredString(record["componentId"], "componentId"),
+		resourceId: requiredString(record["resourceId"], "resourceId"),
+		content: requiredText(record["content"], "content"),
+		expectedDigest: requiredString(record["expectedDigest"], "expectedDigest")
+	};
+}
+function selectedResource(ctx, catalog, selection) {
+	const session = ctx.sessions.get(selection.sessionId);
+	if (session === void 0) throw new CapturedResourceNotFoundError(`会话不存在：${selection.sessionId}`);
+	const resource = catalog.capturedResource(selection.sessionId, selection.componentId, selection.resourceId);
+	if (resource === void 0 || !resource.editable) throw new CapturedResourceNotFoundError("捕获项没有可编辑的文件资源。");
+	return {
+		cwd: session.header.cwd ?? ".",
+		resource
+	};
+}
+function resourceErrorStatus(error) {
+	if (error instanceof TypeError) return 400;
+	if (error instanceof CapturedResourceNotFoundError) return 404;
+	if (error instanceof CapturedResourceConflictError) return 409;
+	return 500;
+}
 function settingsSnapshot(ctx) {
 	const descriptor = ctx.settings.describe().find((row) => row.ns === PROMPT_STUDIO_SETTINGS_NAMESPACE);
 	if (descriptor === void 0) throw new Error("prompt-studio settings namespace is not registered");
@@ -1352,7 +1597,8 @@ function installRoutes(ctx, catalog) {
 					response.end();
 					return;
 				}
-				respondJson(response, 200, catalog.snapshot(), request.method === "HEAD");
+				const sessionId = requestUrl(request).searchParams.get("sessionId") ?? void 0;
+				respondJson(response, 200, catalog.snapshot(sessionId), request.method === "HEAD");
 			}
 		}), "prompt-studio: runtime catalog route");
 		routeCtx.effect(() => routeCtx.httpServer.register({
@@ -1378,6 +1624,30 @@ function installRoutes(ctx, catalog) {
 				}
 			}
 		}), "prompt-studio: settings route");
+		routeCtx.effect(() => routeCtx.httpServer.register({
+			kind: "exact",
+			path: PROMPT_STUDIO_RESOURCE_PATH,
+			handler: async (request, response) => {
+				try {
+					if (request.method === "GET" || request.method === "HEAD") {
+						const selected = selectedResource(routeCtx, catalog, resourceSelectionFromUrl(request));
+						respondJson(response, 200, await loadCapturedResource(selected.cwd, selected.resource), request.method === "HEAD");
+						return;
+					}
+					if (request.method === "POST") {
+						const update = resourceUpdate(await requestJson(request));
+						const selected = selectedResource(routeCtx, catalog, update);
+						respondJson(response, 200, await saveCapturedResource(selected.cwd, selected.resource, update.content, update.expectedDigest));
+						return;
+					}
+					response.writeHead(405);
+					response.end();
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					respondJson(response, resourceErrorStatus(error), { error: message });
+				}
+			}
+		}), "prompt-studio: captured resource route");
 	});
 }
 /** Register the live namespace and unified component pipeline. */
@@ -1415,7 +1685,7 @@ async function apply(ctx) {
 		});
 	};
 	ctx.on("system-prompt/change", requestRefresh);
-	ctx.on("llm/stream", (options, next) => rewriteRequest(ctx, plans, options, next));
+	ctx.on("llm/stream", (options, next) => rewriteRequest(ctx, plans, catalog, options, next));
 	ctx.effect(() => () => {
 		plans.clear();
 	}, "prompt-studio: supplementary request plans");
@@ -1430,4 +1700,4 @@ async function apply(ctx) {
 	await ctx.systemPrompt.assemble();
 }
 //#endregion
-export { DEFAULT_SUPPLEMENT_ORDER, PROMPT_STUDIO_NAMESPACE, PROMPT_STUDIO_SETTINGS_NAMESPACE, PROMPT_STUDIO_SETTINGS_PATH, PROMPT_STUDIO_STATE_PATH, PROMPT_STUDIO_VIEW_ORDER, apply, buildDraftSystemComponents, inject, isNativeOverride, name, nextOverrideId, nextSupplementId, renderSupplementBoundary, renderSystemPreview, studioConfigSchema, validatePromptComponents };
+export { DEFAULT_SUPPLEMENT_ORDER, PROMPT_STUDIO_NAMESPACE, PROMPT_STUDIO_RESOURCE_PATH, PROMPT_STUDIO_SETTINGS_NAMESPACE, PROMPT_STUDIO_SETTINGS_PATH, PROMPT_STUDIO_STATE_PATH, PROMPT_STUDIO_VIEW_ORDER, apply, buildDraftSystemComponents, inject, isNativeOverride, name, nextOverrideId, nextSupplementId, renderSupplementBoundary, renderSystemPreview, studioConfigSchema, validatePromptComponents };

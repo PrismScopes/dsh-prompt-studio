@@ -30,6 +30,11 @@ const roleSchema = z.union([
   z.const('assistant'),
 ]) as z<PromptComponentRole>
 
+const blockTypeSchema = z.union([
+  z.const('text'),
+  z.const('reasoning'),
+])
+
 const componentSchema: z<PromptComponent> = z.object({
   id: z.string().min(1),
   kind: kindSchema,
@@ -39,6 +44,7 @@ const componentSchema: z<PromptComponent> = z.object({
   enabled: z.boolean().default(true),
   template: z.string(),
   origin: z.string().min(1).default(undefined as unknown as string),
+  blockType: blockTypeSchema.default(undefined as unknown as 'text' | 'reasoning'),
 })
 
 const uniqueComponents = z.transform(z.array(componentSchema), (components) => {

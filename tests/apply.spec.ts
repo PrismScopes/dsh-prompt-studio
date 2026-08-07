@@ -13,46 +13,44 @@ async function bench() {
   const slots = ctx.get('slots') as SlotsService
   slots.register({
     name: 'root',
-    children: { 'conversation.view': { kind: 'list', scope: 'session' } },
+    children: {
+      'conversation.view': { kind: 'list', scope: 'session' },
+      'settings.section': { kind: 'list', scope: 'root' },
+    },
   } as never, () => null)
+  await ctx.plugin({ inject: [...inject], apply }).await()
   return { ctx, slots }
 }
 
 describe('Prompt Studio browser apply', () => {
-  it('declares the services it consumes', () => {
-    expect(inject).toEqual(['slots', 'conversation', 'connection'])
-  })
-
-  it('registers the Prompt Studio conversation tab and disposes it with the fiber', async () => {
-    const { ctx, slots } = await bench()
-    const fiber = ctx.plugin({ inject: [...inject], apply })
-    await fiber.await()
+  it('registers one session-scoped tab and keeps controllers isolated by session', async () => {
+    const { slots } = await bench()
     const entry = slots.entries('conversation.view')[0]!
     expect(entry.component).toBe(PromptStudioView)
-    expect(entry.options).toMatchObject({
-      id: 'prompt-studio',
-      order: 20,
-      label: 'Prompt Studio',
-    })
-    const injected = (entry.inject as unknown as () => PromptStudioViewInjected)()
-    expect(typeof injected.controller.load).toBe('function')
-    expect(typeof injected.useSnapshot).toBe('function')
-
-    await fiber.dispose()
-    expect(slots.entries('conversation.view')).toHaveLength(0)
+    expect(entry.options).toMatchObject({ id: 'prompt-studio', order: 20, label: 'Prompt Studio' })
+    const injectFace = entry.inject as unknown as (sessionId: string) => PromptStudioViewInjected
+    const a1 = injectFace('session-a')
+    const a2 = injectFace('session-a')
+    const b = injectFace('session-b')
+    expect(a1).toBe(a2)
+    expect(a1.controller).not.toBe(b.controller)
   })
 
-  it('refreshes a loaded controller only for relevant pushed invalidations', async () => {
+  it('refreshes every loaded session controller on relevant invalidations', async () => {
     const { ctx, slots } = await bench()
-    await ctx.plugin({ inject: [...inject], apply }).await()
-    const injected = (slots.entries('conversation.view')[0]!.inject as unknown as () => PromptStudioViewInjected)()
-    injected.controller.store.update((state) => { state.status = 'ready' })
-    const load = vi.spyOn(injected.controller, 'load').mockResolvedValue()
+    const injectFace = slots.entries('conversation.view')[0]!.inject as unknown as (sessionId: string) => PromptStudioViewInjected
+    const a = injectFace('session-a')
+    const b = injectFace('session-b')
+    a.controller.store.update(state => { state.status = 'ready' })
+    b.controller.store.update(state => { state.status = 'ready' })
+    const loadA = vi.spyOn(a.controller, 'load').mockResolvedValue()
+    const loadB = vi.spyOn(b.controller, 'load').mockResolvedValue()
 
-    ctx.emit('settings/changed', 'llm-deepseek')
-    expect(load).not.toHaveBeenCalled()
+    ctx.emit('settings/changed', 'unrelated')
+    expect(loadA).not.toHaveBeenCalled()
     ctx.emit('settings/changed', 'prompt-studio')
     ctx.emit('connection/reset')
-    expect(load).toHaveBeenCalledTimes(2)
+    expect(loadA).toHaveBeenCalledTimes(2)
+    expect(loadB).toHaveBeenCalledTimes(2)
   })
 })

@@ -6,67 +6,90 @@ import type { PromptStudioState, PromptStudioStore } from '../src/client/store.t
 
 afterEach(cleanup)
 
-function renderStudio() {
+const captured = {
+  id: 'captured:workspace-1',
+  kind: 'captured' as const,
+  role: 'user' as const,
+  order: 1,
+  enabled: true as const,
+  template: '<system-reminder>Instructions from: AGENTS.md\n\nBe exact.</system-reminder>',
+  messageId: 'workspace-1',
+  sourceKind: 'workspace-instructions',
+  producer: 'workspace-instructions',
+  form: 'instructions',
+  source: {
+    kind: 'workspace-instructions',
+    form: 'instructions',
+    baseline: true,
+    changes: [{ action: 'set', path: 'AGENTS.md', digest: 'old' }],
+  },
+  resources: [{ id: 'resource:0', path: 'AGENTS.md', action: 'set' as const, digest: 'old', editable: true }],
+}
+
+function renderStudio(components: PromptStudioState['components'] = []) {
   const remote: PromptStudioState = {
     status: 'ready',
     error: null,
     writable: true,
     revision: 7,
-    sections: [],
-    overrides: [],
+    components,
+    native: [{ id: 'persona', kind: 'native', role: 'system', order: 0, enabled: true, template: 'Persona.' }],
+    assembled: [{ id: 'persona', kind: 'native', role: 'system', order: 0, enabled: true, template: 'Persona.' }],
+    captured: [captured],
+    capturedSessionId: 'session-a',
+    messageCount: 2,
+    userAnchor: 0,
+    catalogRevision: 4,
   }
   const controller = {
     load: vi.fn(() => Promise.resolve()),
     save: vi.fn(() => Promise.resolve()),
+    loadResource: vi.fn(() => Promise.resolve({ path: 'AGENTS.md', content: 'Be exact.\n', digest: 'current' })),
+    saveResource: vi.fn(() => Promise.resolve({ path: 'AGENTS.md', content: 'Be concise.\n', digest: 'next' })),
   } as unknown as PromptStudioStore
   const useSnapshot = (<T,>(selector: (state: PromptStudioState) => T): T => selector(remote))
-  render(<PromptStudioView {...({ controller, useSnapshot } as unknown as PromptStudioViewProps)} />)
+  const useSession = (<T,>(selector: (state: { nodes: unknown[]; running: boolean }) => T): T => selector({ nodes: [], running: false }))
+  render(<PromptStudioView {...({ controller, useSnapshot, useSession } as unknown as PromptStudioViewProps)} />)
   return { controller }
 }
 
-function builtinCard(name: string): HTMLElement {
-  return screen.getByLabelText(`Built-in section ${name}`)
-}
-
-function previewText(): string {
-  return screen.getByLabelText('Complete prompt preview').querySelector('pre')?.textContent ?? ''
-}
-
-describe('PromptStudioView built-in overrides', () => {
-  it('closes a built-in, marks it, and removes it from the complete preview', () => {
+describe('PromptStudioView automatic context rows', () => {
+  it('shows source/kind/form and the actual model-facing workspace instructions', () => {
     renderStudio()
-    const card = builtinCard('tool:grep')
-    expect(previewText()).toContain('Use the grep tool')
-    fireEvent.click(within(card).getByRole('checkbox'))
-    expect(within(card).getByText('Closed')).toBeTruthy()
-    expect(previewText()).not.toContain('Use the grep tool')
+    const card = screen.getByLabelText('捕获上下文 captured:workspace-1')
+    expect(within(card).getByText(/workspace-instructions · kind=workspace-instructions · form=instructions/)).toBeTruthy()
+    fireEvent.click(within(card).getByRole('button', { name: '查看' }))
+    expect(within(card).getByText(/Instructions from: AGENTS.md/)).toBeTruthy()
+    expect(screen.getByLabelText('完整请求预览').textContent).toContain('自动捕获')
   })
 
-  it('edits and restores a built-in override, then saves both settings arrays', async () => {
+  it('loads raw file bytes and writes them through the source-resource route', async () => {
     const { controller } = renderStudio()
-    const card = builtinCard('tool:grep')
-    fireEvent.click(within(card).getByRole('button', { name: 'Edit' }))
-    fireEvent.change(within(card).getByLabelText('Order'), { target: { value: '12' } })
-    fireEvent.change(within(card).getByLabelText('Section text'), { target: { value: 'Custom grep text.' } })
-    expect(within(card).getByText('Overridden')).toBeTruthy()
-    expect(previewText()).toContain('Custom grep text.')
-
-    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+    const card = screen.getByLabelText('捕获上下文 captured:workspace-1')
+    fireEvent.click(within(card).getByRole('button', { name: '编辑文件：AGENTS.md' }))
+    const editor = await screen.findByLabelText('编辑上下文文件 AGENTS.md')
+    const textarea = within(editor).getByRole('textbox')
+    expect((textarea as HTMLTextAreaElement).value).toBe('Be exact.\n')
+    fireEvent.change(textarea, { target: { value: 'Be concise.\n' } })
+    fireEvent.click(within(editor).getByRole('button', { name: '写回文件' }))
     await waitFor(() => {
-      expect(controller.save).toHaveBeenCalledWith({
-        sections: [],
-        overrides: [{
-          name: 'tool:grep',
-          order: 12,
-          enabled: true,
-          text: 'Custom grep text.',
-        }],
-      }, 7)
+      expect(controller.saveResource).toHaveBeenCalledWith(
+        'captured:workspace-1', 'resource:0', 'Be concise.\n', 'current',
+      )
     })
+    expect(await within(editor).findByText(/原上下文生产者按其状态机协调/)).toBeTruthy()
+  })
 
-    fireEvent.click(within(card).getByRole('button', { name: 'Restore default' }))
-    expect(within(card).getByText('Default')).toBeTruthy()
-    expect(previewText()).toContain('Use the grep tool')
-    expect(previewText()).not.toContain('Custom grep text.')
+  it('keeps settings-backed supplements on the existing save route', async () => {
+    const configured = [{
+      id: 'supplement:message', kind: 'supplement' as const, role: 'user' as const,
+      position: 'tail' as const, order: 100, enabled: true, template: 'Existing.',
+    }]
+    const { controller } = renderStudio(configured)
+    const card = screen.getByText('supplement:message').closest('li')!
+    fireEvent.click(within(card).getByRole('button', { name: '编辑' }))
+    fireEvent.change(within(card).getByDisplayValue('Existing.'), { target: { value: 'Changed.' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存更改' }))
+    await waitFor(() => { expect(controller.save).toHaveBeenCalledWith([{ ...configured[0], template: 'Changed.' }], 7) })
   })
 })

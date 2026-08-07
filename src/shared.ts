@@ -7,6 +7,9 @@ export const PROMPT_STUDIO_STATE_PATH = '/prompt-studio/state'
 /** Same-origin endpoint owned by the plugin for its private settings namespace. */
 export const PROMPT_STUDIO_SETTINGS_PATH = '/prompt-studio/settings'
 
+/** Same-origin endpoint for resources declared by captured context producers. */
+export const PROMPT_STUDIO_RESOURCE_PATH = '/prompt-studio/resource'
+
 /** Conversation-view placement: Chat is 0 and Trajectory is 10. */
 export const PROMPT_STUDIO_VIEW_ORDER = 20
 
@@ -15,6 +18,9 @@ export const DEFAULT_SUPPLEMENT_ORDER = 100
 
 /** Namespace reserved for ordered replacement markers owned by the Host half. */
 export const PROMPT_STUDIO_OVERRIDE_MARKER_PREFIX = 'prompt-studio:override-marker:'
+
+/** Producer id used by Prompt Studio's own request-local messages. */
+export const PROMPT_STUDIO_MESSAGE_SOURCE = 'moeblack/prompt-studio'
 
 /** Runtime provenance is the only component-kind distinction. */
 export type PromptComponentKind = 'native' | 'supplement'
@@ -54,12 +60,63 @@ export interface PromptStudioSettingsSnapshot {
   value: StudioConfig
 }
 
+/** One source-owned file transition exposed by an instructions-form context. */
+export interface CapturedContextResource {
+  /** Stable within the captured message. */
+  id: string
+  /** Producer-facing path; it remains display metadata until the Host resolves it. */
+  path: string
+  action: 'set' | 'replace' | 'remove'
+  digest?: string
+  /** True only when the semantic instructions adapter has enough facts to resolve the file. */
+  editable: boolean
+}
+
+/** One non-conversation message automatically discovered in an actual model request. */
+export interface CapturedPromptComponent {
+  id: string
+  kind: 'captured'
+  role: PromptComponentRole
+  /** Zero-based position in the unmodified request message sequence. */
+  order: number
+  enabled: true
+  /** Human-readable rendering of the exact request blocks. */
+  template: string
+  messageId: string
+  sourceKind: string
+  producer: string
+  form?: string
+  summary?: string
+  /** Complete producer metadata, retained for inspection without interpreting unknown kinds. */
+  source: Record<string, unknown>
+  resources: CapturedContextResource[]
+}
+
+/** Message-layout facts needed to place configured supplements around captured context. */
+export interface RuntimeRequestLayout {
+  messageCount: number
+  /** Zero-based last true-user message index, or null when the request has none. */
+  userAnchor: number | null
+}
+
 /** Runtime state returned by the Host inventory endpoint. */
 export interface RuntimePromptCatalog {
   revision: number
   native: PromptComponent[]
   /** Effective system-section sequence from the latest real assembly. */
   assembled: PromptComponent[]
+  /** Session selected by the request query, or the latest captured session. */
+  sessionId?: string
+  /** Non-user/plugin-produced request messages from that session's latest actual request. */
+  captured: CapturedPromptComponent[]
+  layout: RuntimeRequestLayout
+}
+
+/** Exact current bytes of an editable captured file resource. */
+export interface CapturedResourceSnapshot {
+  path: string
+  content: string
+  digest: string
 }
 
 export type NativeOverride = PromptComponent & { kind: 'supplement'; origin: string }

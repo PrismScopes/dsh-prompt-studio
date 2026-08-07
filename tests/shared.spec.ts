@@ -1,114 +1,61 @@
 import { describe, expect, it } from 'vitest'
 import {
-  BUILTIN_SECTIONS,
-  buildPreviewSections,
-  nextSectionName,
-  renderPreview,
-  resolveBuiltinSections,
-  validateBuiltinOverrides,
-  validateStudioSections,
-  type BuiltinSectionOverride,
-  type StudioSection,
+  buildDraftSystemComponents,
+  nextOverrideId,
+  nextSupplementId,
+  renderSupplementBoundary,
+  renderSystemPreview,
+  validatePromptComponents,
+  type PromptComponent,
 } from '../src/shared.ts'
 
-const section = (overrides: Partial<StudioSection> = {}): StudioSection => ({
-  name: 'user:instructions',
-  order: 60,
-  enabled: true,
-  text: 'User instructions.',
-  ...overrides,
+const native = (id: string, order: number, template: string): PromptComponent => ({
+  id, kind: 'native', role: 'system', order, enabled: true, template,
 })
 
-const builtinOverride = (overrides: Partial<BuiltinSectionOverride> = {}): BuiltinSectionOverride => ({
-  name: 'tool:grep',
-  order: 104,
+const supplement = (overrides: Partial<PromptComponent> = {}): PromptComponent => ({
+  id: 'supplement:message',
+  kind: 'supplement',
+  role: 'user',
+  position: 'tail',
+  order: 100,
   enabled: true,
-  text: 'Overridden grep guidance.',
+  template: 'Extra.',
   ...overrides,
 })
 
 describe('prompt-studio shared contract', () => {
-  it('interleaves enabled user sections with stable built-in order', () => {
-    const rows = buildPreviewSections([
-      section({ name: 'user:before', order: -99.5, text: 'Before.' }),
-      section({ name: 'user:disabled', order: -200, enabled: false }),
-      section({ name: 'user:after', order: 300, text: 'After.' }),
+  it('resolves system overrides and supplements without persisting native rows', () => {
+    const rows = buildDraftSystemComponents([
+      native('identity', -100, 'Identity.'),
+      native('persona', 0, 'Persona.'),
+    ], [
+      supplement({ id: 'override:persona', role: 'system', position: undefined, order: 20, origin: 'persona', template: 'Changed.' }),
+      supplement({ id: 'supplement:system', role: 'system', position: undefined, order: 10, template: 'Middle.' }),
     ])
-    expect(rows[0]?.name).toBe('harness:identity')
-    expect(rows[1]?.name).toBe('user:before')
-    expect(rows.at(-1)?.name).toBe('user:after')
-    expect(rows.some(row => row.name === 'user:disabled')).toBe(false)
+    expect(rows.map(row => row.id)).toEqual(['identity', 'supplement:system', 'override:persona'])
+    expect(renderSystemPreview(rows)).toContain('<supplement id="override:persona">\nChanged.\n</supplement>')
   })
 
-  it('renders the exact blank-line concatenation and drops empty text', () => {
-    const builtins = BUILTIN_SECTIONS.map(row => row.text).filter(Boolean).join('\n\n')
-    expect(renderPreview([
-      section({ order: 300, text: 'Tail.' }),
-      section({ name: 'user:empty', order: 301, text: '' }),
-    ])).toBe(`${builtins}\n\nTail.`)
+  it('validates role/position, runtime provenance, block type, and unique override targets', () => {
+    expect(() => { validatePromptComponents([supplement({ position: undefined })]) }).toThrow('invalid position')
+    expect(() => { validatePromptComponents([supplement({ blockType: 'reasoning' })]) }).toThrow('assistant')
+    expect(() => { validatePromptComponents([native('n', 0, 'N')]) }).toThrow('cannot be persisted')
+    expect(() => {
+      validatePromptComponents([
+        supplement({ id: 'one', role: 'system', position: undefined, origin: 'persona' }),
+        supplement({ id: 'two', role: 'system', position: undefined, origin: 'persona' }),
+      ])
+    }).toThrow('overridden more than once')
   })
 
-  it('closes and replaces built-in rows before assembling the preview', () => {
-    const rows = buildPreviewSections([], [
-      builtinOverride({ enabled: false }),
-      builtinOverride({ name: 'tool:read', order: 400, text: 'Read exactly this way.' }),
-    ])
-    expect(rows.some(row => row.name === 'tool:grep')).toBe(false)
-    expect(rows.at(-1)).toMatchObject({
-      name: 'tool:read',
-      order: 400,
-      text: 'Read exactly this way.',
-      origin: 'builtin',
-    })
-    expect(renderPreview([], [builtinOverride({ enabled: false })]))
-      .not.toContain('Use the grep tool')
+  it('keeps supplement boundaries attributable and escapes ids', () => {
+    expect(renderSupplementBoundary('a"<&', 'Body.')).toBe('<supplement id="a&quot;&lt;&amp;">\nBody.\n</supplement>')
   })
 
-  it('resolves default, overridden, and closed built-in editor states', () => {
-    const rows = resolveBuiltinSections([
-      builtinOverride({ enabled: false }),
-      builtinOverride({ name: 'tool:read', order: 7, text: 'Replacement.' }),
-    ])
-    expect(rows.find(row => row.name === 'harness:identity')).toMatchObject({
-      enabled: true,
-      overridden: false,
-    })
-    expect(rows.find(row => row.name === 'tool:grep')).toMatchObject({
-      enabled: false,
-      overridden: true,
-    })
-    expect(rows.find(row => row.name === 'tool:read')).toMatchObject({
-      enabled: true,
-      overridden: true,
-      order: 7,
-      text: 'Replacement.',
-    })
-  })
-
-  it('rejects duplicate, reserved, malformed, and non-finite user rows', () => {
-    expect(() => { validateStudioSections([section(), section()]) }).toThrow('listed more than once')
-    expect(() => { validateStudioSections([section({ name: 'deployment:persona' })]) }).toThrow('built in')
-    expect(() => { validateStudioSections([section({ name: 'prompt-studio:override-marker:tool:grep' })]) })
-      .toThrow('reserved by Prompt Studio')
-    expect(() => { validateStudioSections([section({ name: ' user:space' })]) }).toThrow('surrounding whitespace')
-    expect(() => { validateStudioSections([section({ order: Number.NaN })]) }).toThrow('finite number')
-  })
-
-  it('accepts only one finite override for each shipped built-in', () => {
-    expect(() => { validateBuiltinOverrides([builtinOverride(), builtinOverride()]) })
-      .toThrow('listed more than once')
-    expect(() => { validateBuiltinOverrides([builtinOverride({ name: 'user:not-built-in' })]) })
-      .toThrow('is not a built-in prompt section')
-    expect(() => { validateBuiltinOverrides([builtinOverride({ order: Number.POSITIVE_INFINITY })]) })
-      .toThrow('finite number')
-    expect(() => { validateBuiltinOverrides([builtinOverride()]) }).not.toThrow()
-  })
-
-  it('allocates readable names without colliding with the draft', () => {
-    expect(nextSectionName([])).toBe('user:section')
-    expect(nextSectionName([
-      section({ name: 'user:section' }),
-      section({ name: 'user:section-2' }),
-    ])).toBe('user:section-3')
+  it('allocates readable supplement and override ids', () => {
+    const rows = [supplement(), supplement({ id: 'supplement:message-2' })]
+    expect(nextSupplementId(rows)).toBe('supplement:message-3')
+    expect(nextOverrideId(rows, 'persona')).toBe('override:persona')
   })
 })

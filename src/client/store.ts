@@ -2,9 +2,13 @@
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
 import {
+  PROMPT_STUDIO_RESOURCE_PATH,
   PROMPT_STUDIO_SETTINGS_PATH,
   PROMPT_STUDIO_STATE_PATH,
   validatePromptComponents,
+  type CapturedContextResource,
+  type CapturedPromptComponent,
+  type CapturedResourceSnapshot,
   type PromptComponent,
   type PromptComponentKind,
   type PromptComponentPosition,
@@ -23,6 +27,10 @@ export interface PromptStudioState {
   components: readonly PromptComponent[]
   native: readonly PromptComponent[]
   assembled: readonly PromptComponent[]
+  captured: readonly CapturedPromptComponent[]
+  capturedSessionId: string | null
+  messageCount: number
+  userAnchor: number | null
   catalogRevision: number
 }
 
@@ -59,6 +67,7 @@ function decodeComponents(value: unknown, label: string, allowNative: boolean): 
       || typeof candidate['enabled'] !== 'boolean'
       || typeof candidate['template'] !== 'string'
       || (candidate['origin'] !== undefined && typeof candidate['origin'] !== 'string')
+      || (candidate['blockType'] !== undefined && candidate['blockType'] !== 'text' && candidate['blockType'] !== 'reasoning')
     ) {
       throw new TypeError(`prompt-studio ${label} row ${String(index + 1)} has an invalid shape`)
     }
@@ -70,6 +79,7 @@ function decodeComponents(value: unknown, label: string, allowNative: boolean): 
       enabled: candidate['enabled'],
       template: candidate['template'],
       ...candidate['origin'] === undefined ? {} : { origin: candidate['origin'] as string },
+      ...candidate['blockType'] === undefined ? {} : { blockType: candidate['blockType'] as 'text' | 'reasoning' },
     }
     if (component.role !== 'system') component.position = position as PromptComponentPosition
     return component
@@ -86,18 +96,105 @@ function decodeConfig(value: unknown): StudioConfig {
   return { components: decodeComponents(candidate.components, 'components', false) }
 }
 
+function decodeCapturedResources(value: unknown, row: number): CapturedContextResource[] {
+  if (!Array.isArray(value)) throw new TypeError(`prompt-studio captured row ${String(row + 1)} resources is not an array`)
+  return value.map((entry, index) => {
+    const candidate = objectRow(entry, 'captured resource', index)
+    const action = candidate['action']
+    if (
+      typeof candidate['id'] !== 'string'
+      || typeof candidate['path'] !== 'string'
+      || (action !== 'set' && action !== 'replace' && action !== 'remove')
+      || (candidate['digest'] !== undefined && typeof candidate['digest'] !== 'string')
+      || typeof candidate['editable'] !== 'boolean'
+    ) {
+      throw new TypeError(`prompt-studio captured row ${String(row + 1)} resource ${String(index + 1)} has an invalid shape`)
+    }
+    return {
+      id: candidate['id'],
+      path: candidate['path'],
+      action,
+      ...candidate['digest'] === undefined ? {} : { digest: candidate['digest'] as string },
+      editable: candidate['editable'],
+    }
+  })
+}
+
+function decodeCaptured(value: unknown): CapturedPromptComponent[] {
+  if (!Array.isArray(value)) throw new TypeError('prompt-studio captured catalog is not an array')
+  return value.map((entry, index) => {
+    const candidate = objectRow(entry, 'captured catalog', index)
+    const source = candidate['source']
+    const role = candidate['role']
+    if (
+      typeof candidate['id'] !== 'string'
+      || candidate['kind'] !== 'captured'
+      || typeof role !== 'string' || !ROLES.has(role as PromptComponentRole)
+      || typeof candidate['order'] !== 'number' || !Number.isSafeInteger(candidate['order'])
+      || candidate['enabled'] !== true
+      || typeof candidate['template'] !== 'string'
+      || typeof candidate['messageId'] !== 'string'
+      || typeof candidate['sourceKind'] !== 'string'
+      || typeof candidate['producer'] !== 'string'
+      || (candidate['form'] !== undefined && typeof candidate['form'] !== 'string')
+      || (candidate['summary'] !== undefined && typeof candidate['summary'] !== 'string')
+      || typeof source !== 'object' || source === null || Array.isArray(source)
+    ) {
+      throw new TypeError(`prompt-studio captured catalog row ${String(index + 1)} has an invalid shape`)
+    }
+    return {
+      id: candidate['id'],
+      kind: 'captured',
+      role: role as PromptComponentRole,
+      order: candidate['order'],
+      enabled: true,
+      template: candidate['template'],
+      messageId: candidate['messageId'],
+      sourceKind: candidate['sourceKind'],
+      producer: candidate['producer'],
+      ...candidate['form'] === undefined ? {} : { form: candidate['form'] as string },
+      ...candidate['summary'] === undefined ? {} : { summary: candidate['summary'] as string },
+      source: structuredClone(source as Record<string, unknown>),
+      resources: decodeCapturedResources(candidate['resources'], index),
+    }
+  })
+}
+
 function decodeCatalog(value: unknown): RuntimePromptCatalog {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new TypeError('prompt-studio runtime catalog is not an object')
   }
-  const candidate = value as { revision?: unknown; native?: unknown; assembled?: unknown }
+  const candidate = value as {
+    revision?: unknown
+    native?: unknown
+    assembled?: unknown
+    sessionId?: unknown
+    captured?: unknown
+    layout?: unknown
+  }
   if (typeof candidate.revision !== 'number' || !Number.isSafeInteger(candidate.revision)) {
     throw new TypeError('prompt-studio runtime catalog has an invalid revision')
+  }
+  if (candidate.sessionId !== undefined && typeof candidate.sessionId !== 'string') {
+    throw new TypeError('prompt-studio runtime catalog has an invalid session id')
+  }
+  const layout = objectRow(candidate.layout, 'request layout', 0)
+  if (!Number.isSafeInteger(layout['messageCount']) || (layout['messageCount'] as number) < 0) {
+    throw new TypeError('prompt-studio runtime catalog has an invalid message count')
+  }
+  if (layout['userAnchor'] !== null && (!Number.isSafeInteger(layout['userAnchor']) || (layout['userAnchor'] as number) < 0)) {
+    throw new TypeError('prompt-studio runtime catalog has an invalid user anchor')
   }
   return {
     revision: candidate.revision,
     native: decodeComponents(candidate.native, 'native catalog', true),
     assembled: decodeComponents(candidate.assembled, 'assembled catalog', true),
+    ...candidate.sessionId === undefined ? {} : { sessionId: candidate.sessionId },
+    captured: decodeCaptured(candidate.captured),
+    layout: {
+      messageCount: layout['messageCount'] as number,
+      userAnchor: layout['userAnchor'] as number | null,
+    },
   }
 }
 
@@ -119,6 +216,25 @@ function decodeSettings(value: unknown): PromptStudioSettingsSnapshot {
   }
 }
 
+function decodeResource(value: unknown): CapturedResourceSnapshot {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new TypeError('prompt-studio captured resource is not an object')
+  }
+  const candidate = value as Record<string, unknown>
+  if (
+    typeof candidate['path'] !== 'string'
+    || typeof candidate['content'] !== 'string'
+    || typeof candidate['digest'] !== 'string'
+  ) {
+    throw new TypeError('prompt-studio captured resource has an invalid shape')
+  }
+  return {
+    path: candidate['path'],
+    content: candidate['content'],
+    digest: candidate['digest'],
+  }
+}
+
 async function responseValue(response: Response): Promise<unknown> {
   const value = await response.json() as unknown
   if (response.ok) return value
@@ -137,14 +253,16 @@ async function loadSettings(): Promise<PromptStudioSettingsSnapshot> {
   return decodeSettings(await responseValue(response))
 }
 
-async function loadCatalog(): Promise<RuntimePromptCatalog> {
-  const response = await fetch(PROMPT_STUDIO_STATE_PATH, {
+async function loadCatalog(sessionId?: string): Promise<RuntimePromptCatalog> {
+  const path = sessionId === undefined
+    ? PROMPT_STUDIO_STATE_PATH
+    : `${PROMPT_STUDIO_STATE_PATH}?sessionId=${encodeURIComponent(sessionId)}`
+  const response = await fetch(path, {
     method: 'GET',
     headers: { accept: 'application/json' },
     cache: 'no-store',
   })
-  if (!response.ok) throw new Error(`prompt-studio runtime catalog returned HTTP ${String(response.status)}`)
-  return decodeCatalog(await response.json())
+  return decodeCatalog(await responseValue(response))
 }
 
 /** One browser-side controller, shared by every session-scoped mount of the view. */
@@ -158,10 +276,16 @@ export class PromptStudioStore {
     components: [],
     native: [],
     assembled: [],
+    captured: [],
+    capturedSessionId: null,
+    messageCount: 0,
+    userAnchor: null,
     catalogRevision: 0,
   })
 
   private generation = 0
+
+  constructor(private readonly sessionId?: string) {}
 
   /** Refetch the namespace descriptor and runtime registry; newest request wins. */
   async load(): Promise<void> {
@@ -173,7 +297,7 @@ export class PromptStudioStore {
     try {
       const [settings, catalog] = await Promise.all([
         loadSettings(),
-        loadCatalog(),
+        loadCatalog(this.sessionId),
       ])
       if (generation !== this.generation) return
       this.accept(settings, catalog)
@@ -202,9 +326,46 @@ export class PromptStudioStore {
       }),
     })
     const settings = decodeSettings(await responseValue(response))
-    const catalog = await loadCatalog()
+    const catalog = await loadCatalog(this.sessionId)
     if (generation !== this.generation) return
     this.accept(settings, catalog)
+  }
+
+  /** Load one raw file selected by a captured instructions-form context. */
+  async loadResource(componentId: string, resourceId: string): Promise<CapturedResourceSnapshot> {
+    const sessionId = this.requireCapturedSession()
+    const query = new URLSearchParams({ sessionId, componentId, resourceId })
+    const response = await fetch(`${PROMPT_STUDIO_RESOURCE_PATH}?${query.toString()}`, {
+      method: 'GET',
+      headers: { accept: 'application/json' },
+      cache: 'no-store',
+    })
+    return decodeResource(await responseValue(response))
+  }
+
+  /** Write one captured source file; its producer remains responsible for next-step reconciliation. */
+  async saveResource(
+    componentId: string,
+    resourceId: string,
+    content: string,
+    expectedDigest: string,
+  ): Promise<CapturedResourceSnapshot> {
+    const sessionId = this.requireCapturedSession()
+    const response = await fetch(PROMPT_STUDIO_RESOURCE_PATH, {
+      method: 'POST',
+      headers: {
+        accept: 'application/json',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ sessionId, componentId, resourceId, content, expectedDigest }),
+    })
+    return decodeResource(await responseValue(response))
+  }
+
+  private requireCapturedSession(): string {
+    const sessionId = this.store.getSnapshot().capturedSessionId
+    if (sessionId === null) throw new Error('当前没有已捕获请求所属的会话。')
+    return sessionId
   }
 
   private accept(
@@ -219,6 +380,10 @@ export class PromptStudioStore {
       state.components = settings.value.components
       state.native = catalog.native
       state.assembled = catalog.assembled
+      state.captured = catalog.captured
+      state.capturedSessionId = catalog.sessionId ?? null
+      state.messageCount = catalog.layout.messageCount
+      state.userAnchor = catalog.layout.userAnchor
       state.catalogRevision = catalog.revision
     })
   }

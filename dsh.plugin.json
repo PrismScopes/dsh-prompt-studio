@@ -1,6 +1,6 @@
 {
   "id": "moeblack/prompt-studio",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "main": "./index.mjs",
   "description": "Compose runtime prompts, overrides, and request-local synthetic turns in one live editor",
   "engines": {

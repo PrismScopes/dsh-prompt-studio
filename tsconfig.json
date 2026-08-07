@@ -3,7 +3,11 @@
   "compilerOptions": {
     "rootDir": "src",
     "outDir": "dist/types",
-    "tsBuildInfoFile": "dist/tsconfig.tsbuildinfo"
+    "tsBuildInfoFile": "dist/tsconfig.tsbuildinfo",
+    "typeRoots": [
+      "./.dsh/node_modules/@types",
+      "./node_modules/@types"
+    ]
   },
   "include": [
     "src"
@@ -20,6 +24,9 @@
     },
     {
       "path": "./.dsh/packages/core/agent"
+    },
+    {
+      "path": "./.dsh/packages/core/session"
     },
     {
       "path": "./.dsh/packages/llm/llm"

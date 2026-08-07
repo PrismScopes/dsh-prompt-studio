@@ -8,20 +8,31 @@ import type {
   StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 import type { SettingsNamespace, SettingsScope } from '@deepseek-ai/dsh-settings'
+import type { SessionId } from '@deepseek-ai/dsh-session'
 import type {
   AssembledSection,
   AssembleContext,
   PromptAssembly,
 } from '@deepseek-ai/dsh-system-prompt'
 import { studioConfigSchema } from './config.ts'
+import { captureInjectedMessages, requestLayout } from './capture.ts'
 import {
+  CapturedResourceConflictError,
+  CapturedResourceNotFoundError,
+  loadCapturedResource,
+  saveCapturedResource,
+} from './resource.ts'
+import {
+  PROMPT_STUDIO_MESSAGE_SOURCE,
   PROMPT_STUDIO_NAMESPACE,
   PROMPT_STUDIO_OVERRIDE_MARKER_PREFIX,
+  PROMPT_STUDIO_RESOURCE_PATH,
   PROMPT_STUDIO_SETTINGS_PATH,
   PROMPT_STUDIO_STATE_PATH,
   isNativeOverride,
   renderSupplementBoundary,
   validatePromptComponents,
+  type CapturedPromptComponent,
   type NativeOverride,
   type PromptComponent,
   type PromptStudioSettingsSnapshot,
@@ -32,6 +43,7 @@ import {
 export {
   DEFAULT_SUPPLEMENT_ORDER,
   PROMPT_STUDIO_NAMESPACE,
+  PROMPT_STUDIO_RESOURCE_PATH,
   PROMPT_STUDIO_SETTINGS_PATH,
   PROMPT_STUDIO_STATE_PATH,
   PROMPT_STUDIO_VIEW_ORDER,
@@ -44,6 +56,9 @@ export {
   validatePromptComponents,
 } from './shared.ts'
 export type {
+  CapturedContextResource,
+  CapturedPromptComponent,
+  CapturedResourceSnapshot,
   NativeOverride,
   PromptComponent,
   PromptComponentKind,
@@ -61,13 +76,13 @@ export const PROMPT_STUDIO_SETTINGS_NAMESPACE = PROMPT_STUDIO_NAMESPACE as Setti
 export const name = 'client-ui-prompt-studio'
 
 /** Host services required by the component and request pipelines. */
-export const inject = ['settings', 'systemPrompt', 'llm']
+export const inject = ['settings', 'systemPrompt', 'llm', 'sessions']
 
-const REQUEST_SOURCE = 'moeblack/prompt-studio'
 const SYSTEM_SECTION_PREFIX = 'prompt-studio:supplement-section:'
 
 interface HttpRequestLike {
   method?: string
+  url?: string
   on(event: 'data', listener: (chunk: Uint8Array | string) => void): this
   on(event: 'end', listener: () => void): this
   on(event: 'error', listener: (error: unknown) => void): this
@@ -254,6 +269,11 @@ class RuntimeCatalogStore {
   private revision = 0
   private native: PromptComponent[] = []
   private assembled: PromptComponent[] = []
+  private readonly requests = new Map<string, {
+    captured: CapturedPromptComponent[]
+    layout: RuntimePromptCatalog['layout']
+  }>()
+  private latestSessionId: string | undefined
 
   commit(native: readonly PromptComponent[], assembled: readonly PromptComponent[]): void {
     const nextNative = native.map(cloneComponent)
@@ -267,12 +287,41 @@ class RuntimeCatalogStore {
     this.revision += 1
   }
 
-  snapshot(): RuntimePromptCatalog {
+  commitRequest(sessionId: string, messages: readonly Message[]): void {
+    const next = {
+      captured: captureInjectedMessages(messages),
+      layout: requestLayout(messages),
+    }
+    const previous = this.requests.get(sessionId)
+    this.latestSessionId = sessionId
+    if (previous !== undefined && JSON.stringify(previous) === JSON.stringify(next)) return
+    this.requests.set(sessionId, structuredClone(next))
+    this.revision += 1
+  }
+
+  snapshot(requestedSessionId?: string): RuntimePromptCatalog {
+    const sessionId = requestedSessionId ?? this.latestSessionId
+    const request = sessionId === undefined ? undefined : this.requests.get(sessionId)
     return {
       revision: this.revision,
       native: this.native.map(cloneComponent),
       assembled: this.assembled.map(cloneComponent),
+      ...sessionId === undefined ? {} : { sessionId },
+      captured: request === undefined ? [] : structuredClone(request.captured),
+      layout: request === undefined
+        ? { messageCount: 0, userAnchor: null }
+        : { ...request.layout },
     }
+  }
+
+  capturedResource(
+    sessionId: string,
+    componentId: string,
+    resourceId: string,
+  ): CapturedPromptComponent['resources'][number] | undefined {
+    const component = this.requests.get(sessionId)?.captured.find(item => item.id === componentId)
+    const resource = component?.resources.find(item => item.id === resourceId)
+    return resource === undefined ? undefined : { ...resource }
   }
 }
 
@@ -368,7 +417,7 @@ function supplementalMessage(supplement: PlannedSupplement): Message {
     id: crypto.randomUUID(),
     role: supplement.role,
     content: Object.freeze([supplementBlock(supplement)]),
-    source: Object.freeze({ kind: 'plugin' as const, plugin: REQUEST_SOURCE }),
+    source: Object.freeze({ kind: 'plugin' as const, plugin: PROMPT_STUDIO_MESSAGE_SOURCE }),
   }) as Message
 }
 
@@ -484,6 +533,7 @@ function insertSupplements(
 function rewriteRequest(
   ctx: Context,
   plans: SupplementPlans,
+  catalog: RuntimeCatalogStore,
   options: GenerateOptions,
   next: () => AsyncIterable<StreamChunk>,
 ): AsyncIterable<StreamChunk> {
@@ -492,6 +542,7 @@ function rewriteRequest(
     && Object.isFrozen(options)
     && Object.isFrozen(options.messages)
   if (!loopRequest || options.sessionId === undefined) return next()
+  catalog.commitRequest(String(options.sessionId), options.messages)
   const plan = plans.take(String(options.sessionId))
   if (plan === undefined) return next()
   const messages = insertSupplements(options.messages, plan)
@@ -532,6 +583,76 @@ function requestJson(request: HttpRequestLike): Promise<unknown> {
   })
 }
 
+function requestUrl(request: HttpRequestLike): URL {
+  return new URL(request.url ?? '/', 'http://prompt-studio.local')
+}
+
+interface CapturedResourceSelection {
+  sessionId: string
+  componentId: string
+  resourceId: string
+}
+
+function requiredString(value: unknown, name: string): string {
+  if (typeof value !== 'string' || value.length === 0) throw new TypeError(`${name} 必须是非空字符串。`)
+  return value
+}
+
+function requiredText(value: unknown, name: string): string {
+  if (typeof value !== 'string') throw new TypeError(`${name} 必须是字符串。`)
+  return value
+}
+
+function resourceSelectionFromUrl(request: HttpRequestLike): CapturedResourceSelection {
+  const params = requestUrl(request).searchParams
+  return {
+    sessionId: requiredString(params.get('sessionId'), 'sessionId'),
+    componentId: requiredString(params.get('componentId'), 'componentId'),
+    resourceId: requiredString(params.get('resourceId'), 'resourceId'),
+  }
+}
+
+function resourceUpdate(value: unknown): CapturedResourceSelection & { content: string; expectedDigest: string } {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new TypeError('请求体必须是 JSON 对象。')
+  }
+  const record = value as Record<string, unknown>
+  return {
+    sessionId: requiredString(record['sessionId'], 'sessionId'),
+    componentId: requiredString(record['componentId'], 'componentId'),
+    resourceId: requiredString(record['resourceId'], 'resourceId'),
+    content: requiredText(record['content'], 'content'),
+    expectedDigest: requiredString(record['expectedDigest'], 'expectedDigest'),
+  }
+}
+
+function selectedResource(
+  ctx: Context,
+  catalog: RuntimeCatalogStore,
+  selection: CapturedResourceSelection,
+): { cwd: string; resource: CapturedPromptComponent['resources'][number] } {
+  const session = ctx.sessions.get(selection.sessionId as SessionId)
+  if (session === undefined) {
+    throw new CapturedResourceNotFoundError(`会话不存在：${selection.sessionId}`)
+  }
+  const resource = catalog.capturedResource(
+    selection.sessionId,
+    selection.componentId,
+    selection.resourceId,
+  )
+  if (resource === undefined || !resource.editable) {
+    throw new CapturedResourceNotFoundError('捕获项没有可编辑的文件资源。')
+  }
+  return { cwd: session.header.cwd ?? '.', resource }
+}
+
+function resourceErrorStatus(error: unknown): number {
+  if (error instanceof TypeError) return 400
+  if (error instanceof CapturedResourceNotFoundError) return 404
+  if (error instanceof CapturedResourceConflictError) return 409
+  return 500
+}
+
 function settingsSnapshot(ctx: Context): PromptStudioSettingsSnapshot {
   const descriptor = ctx.settings.describe().find(row => row.ns === PROMPT_STUDIO_SETTINGS_NAMESPACE)
   if (descriptor === undefined) throw new Error('prompt-studio settings namespace is not registered')
@@ -568,7 +689,8 @@ function installRoutes(ctx: Context, catalog: RuntimeCatalogStore): void {
           response.end()
           return
         }
-        respondJson(response, 200, catalog.snapshot(), request.method === 'HEAD')
+        const sessionId = requestUrl(request).searchParams.get('sessionId') ?? undefined
+        respondJson(response, 200, catalog.snapshot(sessionId), request.method === 'HEAD')
       },
     }), 'prompt-studio: runtime catalog route')
     routeCtx.effect(() => routeCtx.httpServer.register({
@@ -598,6 +720,37 @@ function installRoutes(ctx: Context, catalog: RuntimeCatalogStore): void {
         }
       },
     }), 'prompt-studio: settings route')
+    routeCtx.effect(() => routeCtx.httpServer.register({
+      kind: 'exact',
+      path: PROMPT_STUDIO_RESOURCE_PATH,
+      handler: async (request, response) => {
+        try {
+          if (request.method === 'GET' || request.method === 'HEAD') {
+            const selected = selectedResource(routeCtx, catalog, resourceSelectionFromUrl(request))
+            const snapshot = await loadCapturedResource(selected.cwd, selected.resource)
+            respondJson(response, 200, snapshot, request.method === 'HEAD')
+            return
+          }
+          if (request.method === 'POST') {
+            const update = resourceUpdate(await requestJson(request))
+            const selected = selectedResource(routeCtx, catalog, update)
+            const snapshot = await saveCapturedResource(
+              selected.cwd,
+              selected.resource,
+              update.content,
+              update.expectedDigest,
+            )
+            respondJson(response, 200, snapshot)
+            return
+          }
+          response.writeHead(405)
+          response.end()
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message : String(error)
+          respondJson(response, resourceErrorStatus(error), { error: message })
+        }
+      },
+    }), 'prompt-studio: captured resource route')
   })
 }
 
@@ -649,7 +802,7 @@ export async function apply(ctx: Context): Promise<void> {
   }
 
   ctx.on('system-prompt/change', requestRefresh)
-  ctx.on('llm/stream', (options, next) => rewriteRequest(ctx, plans, options, next))
+  ctx.on('llm/stream', (options, next) => rewriteRequest(ctx, plans, catalog, options, next))
   ctx.effect(() => () => { plans.clear() }, 'prompt-studio: supplementary request plans')
   installRoutes(ctx, catalog)
 

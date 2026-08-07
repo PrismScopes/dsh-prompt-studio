@@ -67,6 +67,14 @@ user/assistant 补充先进入选定间隙。若补充组与间隙左侧或右�
 
 system 补充直接通过 `systemPrompt.section()` 参与真实组装，不进入消息计划。user/assistant 补充在 system-prompt 组装时冻结本轮组件与活变量，再通过 `llm/stream` 的既有扩展接缝生成一次性请求副本。消息补充只进入本次模型请求，不写入会话记录。
 
+## 自动捕获注入上下文
+
+请求发出前，插件扫描完整消息序列，自动识别所有「非对话」消息——即生产者注入的上下文（`MessageSource.kind` 既不是 `user`/`model`/`tool`，也不是本插件自己的消息）——并纳入 Prompt Studio 视野，无需预知注入者是谁。任何插件将来注入的新上下文都会自动出现，不需要为它单独加桥。
+
+捕获按消息来源分类（`form`：instructions / catalog / snapshot / notice / relay / recall）。workspace-context 注入的指令（AGENTS.md 基线及其动态增量）会进一步展开为资源条目：每个文件显示路径、动作（set/replace/remove）与内容摘要，`remove` 之外的资源可打开编辑。编辑通过资源读写接口写回文件系统，写回带版本冲突检测——文件在捕获后被修改时会拒绝覆盖并返回冲突，避免与 workspace-context 自身的状态协调（版本缓存、reconcile、字节预算）打架。
+
+捕获是请求级快照：仅当会话发生过模型请求时，面板中才出现捕获条目。
+
 ## 模板变量
 
 模板支持以下引用：

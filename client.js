@@ -12,6 +12,8 @@ window.__ModuleLoader__.load({
 		const PROMPT_STUDIO_STATE_PATH = "/prompt-studio/state";
 		/** Same-origin endpoint owned by the plugin for its private settings namespace. */
 		const PROMPT_STUDIO_SETTINGS_PATH = "/prompt-studio/settings";
+		/** Same-origin endpoint for resources declared by captured context producers. */
+		const PROMPT_STUDIO_RESOURCE_PATH = "/prompt-studio/resource";
 		/** Namespace reserved for ordered replacement markers owned by the Host half. */
 		const PROMPT_STUDIO_OVERRIDE_MARKER_PREFIX = "prompt-studio:override-marker:";
 		const KINDS$1 = new Set(["native", "supplement"]);
@@ -157,7 +159,7 @@ window.__ModuleLoader__.load({
 				const kind = candidate["kind"];
 				const position = candidate["position"];
 				const role = candidate["role"];
-				if (typeof candidate["id"] !== "string" || typeof kind !== "string" || !KINDS.has(kind) || typeof role !== "string" || !ROLES.has(role) || (role === "system" ? position !== void 0 && position !== "after_system" : typeof position !== "string" || !POSITIONS.has(position)) || typeof candidate["order"] !== "number" || typeof candidate["enabled"] !== "boolean" || typeof candidate["template"] !== "string" || candidate["origin"] !== void 0 && typeof candidate["origin"] !== "string") throw new TypeError(`prompt-studio ${label} row ${String(index + 1)} has an invalid shape`);
+				if (typeof candidate["id"] !== "string" || typeof kind !== "string" || !KINDS.has(kind) || typeof role !== "string" || !ROLES.has(role) || (role === "system" ? position !== void 0 && position !== "after_system" : typeof position !== "string" || !POSITIONS.has(position)) || typeof candidate["order"] !== "number" || typeof candidate["enabled"] !== "boolean" || typeof candidate["template"] !== "string" || candidate["origin"] !== void 0 && typeof candidate["origin"] !== "string" || candidate["blockType"] !== void 0 && candidate["blockType"] !== "text" && candidate["blockType"] !== "reasoning") throw new TypeError(`prompt-studio ${label} row ${String(index + 1)} has an invalid shape`);
 				const component = {
 					id: candidate["id"],
 					kind,
@@ -165,7 +167,8 @@ window.__ModuleLoader__.load({
 					order: candidate["order"],
 					enabled: candidate["enabled"],
 					template: candidate["template"],
-					...candidate["origin"] === void 0 ? {} : { origin: candidate["origin"] }
+					...candidate["origin"] === void 0 ? {} : { origin: candidate["origin"] },
+					...candidate["blockType"] === void 0 ? {} : { blockType: candidate["blockType"] }
 				};
 				if (component.role !== "system") component.position = position;
 				return component;
@@ -177,14 +180,63 @@ window.__ModuleLoader__.load({
 			if (typeof value !== "object" || value === null || Array.isArray(value)) throw new TypeError("prompt-studio settings value is not an object");
 			return { components: decodeComponents(value.components, "components", false) };
 		}
+		function decodeCapturedResources(value, row) {
+			if (!Array.isArray(value)) throw new TypeError(`prompt-studio captured row ${String(row + 1)} resources is not an array`);
+			return value.map((entry, index) => {
+				const candidate = objectRow(entry, "captured resource", index);
+				const action = candidate["action"];
+				if (typeof candidate["id"] !== "string" || typeof candidate["path"] !== "string" || action !== "set" && action !== "replace" && action !== "remove" || candidate["digest"] !== void 0 && typeof candidate["digest"] !== "string" || typeof candidate["editable"] !== "boolean") throw new TypeError(`prompt-studio captured row ${String(row + 1)} resource ${String(index + 1)} has an invalid shape`);
+				return {
+					id: candidate["id"],
+					path: candidate["path"],
+					action,
+					...candidate["digest"] === void 0 ? {} : { digest: candidate["digest"] },
+					editable: candidate["editable"]
+				};
+			});
+		}
+		function decodeCaptured(value) {
+			if (!Array.isArray(value)) throw new TypeError("prompt-studio captured catalog is not an array");
+			return value.map((entry, index) => {
+				const candidate = objectRow(entry, "captured catalog", index);
+				const source = candidate["source"];
+				const role = candidate["role"];
+				if (typeof candidate["id"] !== "string" || candidate["kind"] !== "captured" || typeof role !== "string" || !ROLES.has(role) || typeof candidate["order"] !== "number" || !Number.isSafeInteger(candidate["order"]) || candidate["enabled"] !== true || typeof candidate["template"] !== "string" || typeof candidate["messageId"] !== "string" || typeof candidate["sourceKind"] !== "string" || typeof candidate["producer"] !== "string" || candidate["form"] !== void 0 && typeof candidate["form"] !== "string" || candidate["summary"] !== void 0 && typeof candidate["summary"] !== "string" || typeof source !== "object" || source === null || Array.isArray(source)) throw new TypeError(`prompt-studio captured catalog row ${String(index + 1)} has an invalid shape`);
+				return {
+					id: candidate["id"],
+					kind: "captured",
+					role,
+					order: candidate["order"],
+					enabled: true,
+					template: candidate["template"],
+					messageId: candidate["messageId"],
+					sourceKind: candidate["sourceKind"],
+					producer: candidate["producer"],
+					...candidate["form"] === void 0 ? {} : { form: candidate["form"] },
+					...candidate["summary"] === void 0 ? {} : { summary: candidate["summary"] },
+					source: structuredClone(source),
+					resources: decodeCapturedResources(candidate["resources"], index)
+				};
+			});
+		}
 		function decodeCatalog(value) {
 			if (typeof value !== "object" || value === null || Array.isArray(value)) throw new TypeError("prompt-studio runtime catalog is not an object");
 			const candidate = value;
 			if (typeof candidate.revision !== "number" || !Number.isSafeInteger(candidate.revision)) throw new TypeError("prompt-studio runtime catalog has an invalid revision");
+			if (candidate.sessionId !== void 0 && typeof candidate.sessionId !== "string") throw new TypeError("prompt-studio runtime catalog has an invalid session id");
+			const layout = objectRow(candidate.layout, "request layout", 0);
+			if (!Number.isSafeInteger(layout["messageCount"]) || layout["messageCount"] < 0) throw new TypeError("prompt-studio runtime catalog has an invalid message count");
+			if (layout["userAnchor"] !== null && (!Number.isSafeInteger(layout["userAnchor"]) || layout["userAnchor"] < 0)) throw new TypeError("prompt-studio runtime catalog has an invalid user anchor");
 			return {
 				revision: candidate.revision,
 				native: decodeComponents(candidate.native, "native catalog", true),
-				assembled: decodeComponents(candidate.assembled, "assembled catalog", true)
+				assembled: decodeComponents(candidate.assembled, "assembled catalog", true),
+				...candidate.sessionId === void 0 ? {} : { sessionId: candidate.sessionId },
+				captured: decodeCaptured(candidate.captured),
+				layout: {
+					messageCount: layout["messageCount"],
+					userAnchor: layout["userAnchor"]
+				}
 			};
 		}
 		function decodeSettings(value) {
@@ -196,6 +248,16 @@ window.__ModuleLoader__.load({
 				writable: candidate["writable"],
 				revision: candidate["revision"],
 				value: decodeConfig(candidate["value"])
+			};
+		}
+		function decodeResource(value) {
+			if (typeof value !== "object" || value === null || Array.isArray(value)) throw new TypeError("prompt-studio captured resource is not an object");
+			const candidate = value;
+			if (typeof candidate["path"] !== "string" || typeof candidate["content"] !== "string" || typeof candidate["digest"] !== "string") throw new TypeError("prompt-studio captured resource has an invalid shape");
+			return {
+				path: candidate["path"],
+				content: candidate["content"],
+				digest: candidate["digest"]
 			};
 		}
 		async function responseValue(response) {
@@ -211,17 +273,17 @@ window.__ModuleLoader__.load({
 				cache: "no-store"
 			})));
 		}
-		async function loadCatalog() {
-			const response = await fetch(PROMPT_STUDIO_STATE_PATH, {
+		async function loadCatalog(sessionId) {
+			const path = sessionId === void 0 ? PROMPT_STUDIO_STATE_PATH : `${PROMPT_STUDIO_STATE_PATH}?sessionId=${encodeURIComponent(sessionId)}`;
+			return decodeCatalog(await responseValue(await fetch(path, {
 				method: "GET",
 				headers: { accept: "application/json" },
 				cache: "no-store"
-			});
-			if (!response.ok) throw new Error(`prompt-studio runtime catalog returned HTTP ${String(response.status)}`);
-			return decodeCatalog(await response.json());
+			})));
 		}
 		/** One browser-side controller, shared by every session-scoped mount of the view. */
 		var PromptStudioStore = class {
+			sessionId;
 			/** Observable remote namespace state consumed by every mounted Prompt Studio view. */
 			store = (0, _deepseek_ai_dsh_client_runtime_client.createSnapshotStore)({
 				status: "idle",
@@ -231,9 +293,16 @@ window.__ModuleLoader__.load({
 				components: [],
 				native: [],
 				assembled: [],
+				captured: [],
+				capturedSessionId: null,
+				messageCount: 0,
+				userAnchor: null,
 				catalogRevision: 0
 			});
 			generation = 0;
+			constructor(sessionId) {
+				this.sessionId = sessionId;
+			}
 			/** Refetch the namespace descriptor and runtime registry; newest request wins. */
 			async load() {
 				const generation = ++this.generation;
@@ -242,7 +311,7 @@ window.__ModuleLoader__.load({
 					state.error = null;
 				});
 				try {
-					const [settings, catalog] = await Promise.all([loadSettings(), loadCatalog()]);
+					const [settings, catalog] = await Promise.all([loadSettings(), loadCatalog(this.sessionId)]);
 					if (generation !== this.generation) return;
 					this.accept(settings, catalog);
 				} catch (error) {
@@ -268,9 +337,46 @@ window.__ModuleLoader__.load({
 						expectedRevision
 					})
 				})));
-				const catalog = await loadCatalog();
+				const catalog = await loadCatalog(this.sessionId);
 				if (generation !== this.generation) return;
 				this.accept(settings, catalog);
+			}
+			/** Load one raw file selected by a captured instructions-form context. */
+			async loadResource(componentId, resourceId) {
+				const sessionId = this.requireCapturedSession();
+				const query = new URLSearchParams({
+					sessionId,
+					componentId,
+					resourceId
+				});
+				return decodeResource(await responseValue(await fetch(`${PROMPT_STUDIO_RESOURCE_PATH}?${query.toString()}`, {
+					method: "GET",
+					headers: { accept: "application/json" },
+					cache: "no-store"
+				})));
+			}
+			/** Write one captured source file; its producer remains responsible for next-step reconciliation. */
+			async saveResource(componentId, resourceId, content, expectedDigest) {
+				const sessionId = this.requireCapturedSession();
+				return decodeResource(await responseValue(await fetch(PROMPT_STUDIO_RESOURCE_PATH, {
+					method: "POST",
+					headers: {
+						accept: "application/json",
+						"content-type": "application/json"
+					},
+					body: JSON.stringify({
+						sessionId,
+						componentId,
+						resourceId,
+						content,
+						expectedDigest
+					})
+				})));
+			}
+			requireCapturedSession() {
+				const sessionId = this.store.getSnapshot().capturedSessionId;
+				if (sessionId === null) throw new Error("当前没有已捕获请求所属的会话。");
+				return sessionId;
 			}
 			accept(settings, catalog) {
 				this.store.update((state) => {
@@ -281,6 +387,10 @@ window.__ModuleLoader__.load({
 					state.components = settings.value.components;
 					state.native = catalog.native;
 					state.assembled = catalog.assembled;
+					state.captured = catalog.captured;
+					state.capturedSessionId = catalog.sessionId ?? null;
+					state.messageCount = catalog.layout.messageCount;
+					state.userAnchor = catalog.layout.userAnchor;
 					state.catalogRevision = catalog.revision;
 				});
 			}
@@ -292,7 +402,7 @@ window.__ModuleLoader__.load({
 		}
 		//#endregion
 		//#region \0dsh-css:/root/prompt-studio-plugin/src/client/PromptStudioView.module.css.mjs
-		const css = ".Ewsqaa_root{box-sizing:border-box;width:100%;height:100%;min-height:0;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);padding:24px;overflow:auto}.Ewsqaa_pageHeader{justify-content:space-between;align-items:flex-start;gap:20px;max-width:1480px;margin:0 auto 16px;display:flex}.Ewsqaa_title,.Ewsqaa_subtitle,.Ewsqaa_intro,.Ewsqaa_caption,.Ewsqaa_notice,.Ewsqaa_error,.Ewsqaa_empty,.Ewsqaa_excerpt,.Ewsqaa_emptyText,.Ewsqaa_origin,.Ewsqaa_builtinText{margin:0}.Ewsqaa_title{font-size:22px;font-weight:600;line-height:30px}.Ewsqaa_intro{max-width:760px;color:var(--dsw-alias-label-tertiary);margin-top:4px;font-size:14px;line-height:22px}.Ewsqaa_headerActions{flex-wrap:wrap;flex:none;justify-content:flex-end;gap:8px;display:flex}.Ewsqaa_primaryButton,.Ewsqaa_secondaryButton,.Ewsqaa_textButton,.Ewsqaa_dangerButton{box-sizing:border-box;font:inherit;cursor:pointer;border:0}.Ewsqaa_primaryButton,.Ewsqaa_secondaryButton{border-radius:18px;justify-content:center;align-items:center;height:36px;padding:0 14px;font-size:14px;line-height:22px;display:inline-flex}.Ewsqaa_primaryButton{color:var(--dsw-alias-label-primary-foreground);background:var(--dsw-alias-button-primary-fill)}.Ewsqaa_primaryButton:hover:not(:disabled){background:var(--dsw-alias-button-primary-hover)}.Ewsqaa_secondaryButton{border:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-primary);background:0 0}.Ewsqaa_secondaryButton:hover:not(:disabled),.Ewsqaa_textButton:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}.Ewsqaa_primaryButton:disabled,.Ewsqaa_secondaryButton:disabled,.Ewsqaa_textButton:disabled,.Ewsqaa_dangerButton:disabled{cursor:default;opacity:.4}.Ewsqaa_primaryButton:focus-visible,.Ewsqaa_secondaryButton:focus-visible,.Ewsqaa_textButton:focus-visible,.Ewsqaa_dangerButton:focus-visible,.Ewsqaa_input:focus-visible,.Ewsqaa_orderInput:focus-visible,.Ewsqaa_select:focus-visible,.Ewsqaa_textarea:focus-visible,.Ewsqaa_builtinsSummary:focus-visible{box-shadow:0 0 0 2px var(--dsw-alias-border-l3);outline:none}.Ewsqaa_notice,.Ewsqaa_error{max-width:1480px;margin:0 auto 10px;font-size:12px;line-height:18px}.Ewsqaa_notice{color:var(--dsw-alias-state-warn-label)}.Ewsqaa_error{color:var(--dsw-alias-state-error-primary)}.Ewsqaa_status{box-sizing:border-box;width:100%;height:100%;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-layer-1);flex-direction:column;align-items:flex-start;gap:12px;padding:24px;display:flex}.Ewsqaa_status .Ewsqaa_error{margin:0}.Ewsqaa_columns{grid-template-columns:minmax(440px,1fr) minmax(400px,1fr);align-items:start;gap:18px;max-width:1480px;margin:0 auto;display:grid}.Ewsqaa_editorColumn,.Ewsqaa_previewColumn{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);border-radius:14px;min-width:0;padding:16px}.Ewsqaa_previewColumn{position:sticky;top:0}.Ewsqaa_sectionHeading{justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:14px;display:flex}.Ewsqaa_subtitle{font-size:16px;font-weight:500;line-height:24px}.Ewsqaa_caption,.Ewsqaa_origin,.Ewsqaa_emptyText{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}.Ewsqaa_count,.Ewsqaa_orderBadge,.Ewsqaa_stateBadge,.Ewsqaa_kindBadge,.Ewsqaa_positionBadge,.Ewsqaa_roleBadge{color:var(--dsw-alias-label-tertiary);flex:none;font-size:12px;line-height:18px}.Ewsqaa_empty{color:var(--dsw-alias-label-tertiary);background:var(--dsw-alias-bg-module-platform);border-radius:10px;padding:18px;font-size:14px;line-height:22px}.Ewsqaa_componentList,.Ewsqaa_userList,.Ewsqaa_builtinList{flex-direction:column;gap:8px;margin:0;padding:0;list-style:none;display:flex}.Ewsqaa_componentCard,.Ewsqaa_userCard,.Ewsqaa_builtinCard{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;padding:12px}.Ewsqaa_rowHeader{align-items:center;gap:8px;min-width:0;display:flex}.Ewsqaa_enabledControl{color:var(--dsw-alias-label-secondary);flex:none;align-items:center;gap:5px;font-size:12px;line-height:18px;display:inline-flex}.Ewsqaa_enabledControl input{accent-color:var(--dsw-alias-brand-primary)}.Ewsqaa_sectionName{min-width:0;color:var(--dsw-alias-label-primary);text-overflow:ellipsis;white-space:nowrap;font-size:14px;font-weight:500;line-height:22px;overflow:hidden}.Ewsqaa_orderBadge{margin-left:auto}.Ewsqaa_kindBadge,.Ewsqaa_positionBadge,.Ewsqaa_roleBadge,.Ewsqaa_stateBadge{background:var(--dsw-alias-bg-module-platform);border-radius:9px;padding:1px 6px}.Ewsqaa_kindBadge{color:var(--dsw-alias-label-secondary)}.Ewsqaa_textButton,.Ewsqaa_dangerButton{height:28px;color:var(--dsw-alias-label-secondary);background:0 0;border-radius:14px;flex:none;padding:0 9px;font-size:12px;line-height:18px}.Ewsqaa_dangerButton{color:var(--dsw-alias-state-error-primary)}.Ewsqaa_dangerButton:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover-danger)}.Ewsqaa_componentEditor,.Ewsqaa_sectionEditor{background:var(--dsw-alias-bg-module-platform);border-radius:10px;grid-template-columns:minmax(0,1fr) 120px minmax(150px,.6fr);gap:10px;margin-top:12px;padding:12px;display:grid}.Ewsqaa_field{flex-direction:column;gap:5px;display:flex}.Ewsqaa_templateField,.Ewsqaa_textField,.Ewsqaa_builtinTextField{grid-column:1/-1}.Ewsqaa_fieldLabel{color:var(--dsw-alias-label-secondary);font-size:12px;font-weight:500;line-height:18px}.Ewsqaa_input,.Ewsqaa_orderInput,.Ewsqaa_select,.Ewsqaa_textarea{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);width:100%;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);font:inherit;border-radius:8px;font-size:13px}.Ewsqaa_input,.Ewsqaa_orderInput,.Ewsqaa_select{height:32px;padding:0 9px}.Ewsqaa_textarea{resize:vertical;min-height:150px;padding:9px;line-height:20px}.Ewsqaa_input:disabled,.Ewsqaa_orderInput:disabled,.Ewsqaa_select:disabled,.Ewsqaa_textarea:disabled{cursor:default;opacity:.6}.Ewsqaa_excerpt,.Ewsqaa_builtinText{color:var(--dsw-alias-label-secondary);white-space:pre-wrap;margin-top:9px;font-size:12px;line-height:18px}.Ewsqaa_excerpt{-webkit-line-clamp:3;-webkit-box-orient:vertical;display:-webkit-box;overflow:hidden}.Ewsqaa_emptyText{margin-top:9px}.Ewsqaa_builtins{border-top:1px solid var(--dsw-alias-border-l2);margin-top:14px;padding-top:14px}.Ewsqaa_builtinsSummary{width:fit-content;color:var(--dsw-alias-label-secondary);cursor:pointer;border-radius:6px;align-items:center;gap:8px;font-size:14px;font-weight:500;line-height:22px;display:flex}.Ewsqaa_builtinsSummary .Ewsqaa_count{margin-left:4px}.Ewsqaa_builtinList{margin-top:10px}.Ewsqaa_builtinCard{background:var(--dsw-alias-bg-module-platform)}.Ewsqaa_origin{margin-top:5px}.Ewsqaa_assemblyOrder{background:var(--dsw-alias-bg-module-platform);border-radius:10px;flex-direction:column;gap:2px;max-height:190px;margin-bottom:12px;padding:8px;display:flex;overflow:auto}.Ewsqaa_assemblyOrder,.Ewsqaa_preview{--dsh-scrollbar-thumb:var(--dsw-alias-scrollbar-bg-l2);--dsh-scrollbar-thumb-hover:var(--dsw-alias-scrollbar-hover-l2)}.Ewsqaa_assemblyRow{min-height:24px;color:var(--dsw-alias-label-secondary);grid-template-columns:24px minmax(0,1fr) auto;align-items:center;gap:7px;font-size:12px;line-height:18px;display:grid}.Ewsqaa_assemblyIndex,.Ewsqaa_assemblyOrderValue{color:var(--dsw-alias-label-tertiary)}.Ewsqaa_preview{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);width:100%;min-height:320px;max-height:calc(100vh - 380px);color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-module-platform);white-space:pre-wrap;overflow-wrap:anywhere;border-radius:10px;margin:0;padding:14px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:19px;overflow:auto}@media (width<=1000px){.Ewsqaa_columns{grid-template-columns:1fr}.Ewsqaa_previewColumn{position:static}.Ewsqaa_preview{max-height:520px}}@media (width<=680px){.Ewsqaa_root{padding:16px}.Ewsqaa_pageHeader{flex-direction:column}.Ewsqaa_headerActions{width:100%}.Ewsqaa_primaryButton,.Ewsqaa_secondaryButton{flex:1}.Ewsqaa_rowHeader{flex-wrap:wrap}.Ewsqaa_sectionName{flex-basis:100%;order:-1}.Ewsqaa_orderBadge{margin-left:0}.Ewsqaa_componentEditor,.Ewsqaa_sectionEditor{grid-template-columns:1fr}.Ewsqaa_templateField,.Ewsqaa_textField,.Ewsqaa_builtinTextField{grid-column:auto}}.Ewsqaa_previewSystem{white-space:pre-wrap;overflow-wrap:anywhere;margin:0;padding:0}.Ewsqaa_previewSupplement{border:1px solid var(--dsw-alias-border-l2);border-left:3px solid var(--dsw-alias-accent-primary,#4a7dff);background:var(--dsw-alias-bg-module-hover,#7f7f7f14);border-radius:6px;margin:8px 0 0;padding:8px 10px}.Ewsqaa_previewSupplementTag{color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-module-hover,#7f7f7f24);border-radius:4px;margin-bottom:4px;padding:0 6px;font-size:11px;line-height:18px;display:inline-block}.Ewsqaa_previewSupplementText{white-space:pre-wrap;overflow-wrap:anywhere;margin:0}";
+		const css = ".Ewsqaa_root{box-sizing:border-box;width:100%;height:100%;min-height:0;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);padding:24px;overflow:auto}.Ewsqaa_pageHeader{justify-content:space-between;align-items:flex-start;gap:20px;max-width:1480px;margin:0 auto 16px;display:flex}.Ewsqaa_title,.Ewsqaa_subtitle,.Ewsqaa_intro,.Ewsqaa_caption,.Ewsqaa_notice,.Ewsqaa_error,.Ewsqaa_empty,.Ewsqaa_excerpt,.Ewsqaa_emptyText,.Ewsqaa_origin,.Ewsqaa_builtinText{margin:0}.Ewsqaa_title{font-size:22px;font-weight:600;line-height:30px}.Ewsqaa_intro{max-width:760px;color:var(--dsw-alias-label-tertiary);margin-top:4px;font-size:14px;line-height:22px}.Ewsqaa_headerActions{flex-wrap:wrap;flex:none;justify-content:flex-end;gap:8px;display:flex}.Ewsqaa_primaryButton,.Ewsqaa_secondaryButton,.Ewsqaa_textButton,.Ewsqaa_dangerButton{box-sizing:border-box;font:inherit;cursor:pointer;border:0}.Ewsqaa_primaryButton,.Ewsqaa_secondaryButton{border-radius:18px;justify-content:center;align-items:center;height:36px;padding:0 14px;font-size:14px;line-height:22px;display:inline-flex}.Ewsqaa_primaryButton{color:var(--dsw-alias-label-primary-foreground);background:var(--dsw-alias-button-primary-fill)}.Ewsqaa_primaryButton:hover:not(:disabled){background:var(--dsw-alias-button-primary-hover)}.Ewsqaa_secondaryButton{border:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-primary);background:0 0}.Ewsqaa_secondaryButton:hover:not(:disabled),.Ewsqaa_textButton:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}.Ewsqaa_primaryButton:disabled,.Ewsqaa_secondaryButton:disabled,.Ewsqaa_textButton:disabled,.Ewsqaa_dangerButton:disabled{cursor:default;opacity:.4}.Ewsqaa_primaryButton:focus-visible,.Ewsqaa_secondaryButton:focus-visible,.Ewsqaa_textButton:focus-visible,.Ewsqaa_dangerButton:focus-visible,.Ewsqaa_input:focus-visible,.Ewsqaa_orderInput:focus-visible,.Ewsqaa_select:focus-visible,.Ewsqaa_textarea:focus-visible,.Ewsqaa_builtinsSummary:focus-visible{box-shadow:0 0 0 2px var(--dsw-alias-border-l3);outline:none}.Ewsqaa_notice,.Ewsqaa_error{max-width:1480px;margin:0 auto 10px;font-size:12px;line-height:18px}.Ewsqaa_notice{color:var(--dsw-alias-state-warn-label)}.Ewsqaa_error{color:var(--dsw-alias-state-error-primary)}.Ewsqaa_status{box-sizing:border-box;width:100%;height:100%;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-layer-1);flex-direction:column;align-items:flex-start;gap:12px;padding:24px;display:flex}.Ewsqaa_status .Ewsqaa_error{margin:0}.Ewsqaa_columns{grid-template-columns:minmax(440px,1fr) minmax(400px,1fr);align-items:start;gap:18px;max-width:1480px;margin:0 auto;display:grid}.Ewsqaa_editorColumn,.Ewsqaa_previewColumn{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);border-radius:14px;min-width:0;padding:16px}.Ewsqaa_previewColumn{position:sticky;top:0}.Ewsqaa_sectionHeading{justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:14px;display:flex}.Ewsqaa_subtitle{font-size:16px;font-weight:500;line-height:24px}.Ewsqaa_caption,.Ewsqaa_origin,.Ewsqaa_emptyText{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}.Ewsqaa_count,.Ewsqaa_orderBadge,.Ewsqaa_stateBadge,.Ewsqaa_kindBadge,.Ewsqaa_positionBadge,.Ewsqaa_roleBadge{color:var(--dsw-alias-label-tertiary);flex:none;font-size:12px;line-height:18px}.Ewsqaa_empty{color:var(--dsw-alias-label-tertiary);background:var(--dsw-alias-bg-module-platform);border-radius:10px;padding:18px;font-size:14px;line-height:22px}.Ewsqaa_componentList,.Ewsqaa_userList,.Ewsqaa_builtinList{flex-direction:column;gap:8px;margin:0;padding:0;list-style:none;display:flex}.Ewsqaa_componentCard,.Ewsqaa_userCard,.Ewsqaa_builtinCard{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;padding:12px}.Ewsqaa_rowHeader{align-items:center;gap:8px;min-width:0;display:flex}.Ewsqaa_enabledControl{color:var(--dsw-alias-label-secondary);flex:none;align-items:center;gap:5px;font-size:12px;line-height:18px;display:inline-flex}.Ewsqaa_enabledControl input{accent-color:var(--dsw-alias-brand-primary)}.Ewsqaa_sectionName{min-width:0;color:var(--dsw-alias-label-primary);text-overflow:ellipsis;white-space:nowrap;font-size:14px;font-weight:500;line-height:22px;overflow:hidden}.Ewsqaa_orderBadge{margin-left:auto}.Ewsqaa_kindBadge,.Ewsqaa_positionBadge,.Ewsqaa_roleBadge,.Ewsqaa_stateBadge{background:var(--dsw-alias-bg-module-platform);border-radius:9px;padding:1px 6px}.Ewsqaa_kindBadge{color:var(--dsw-alias-label-secondary)}.Ewsqaa_textButton,.Ewsqaa_dangerButton{height:28px;color:var(--dsw-alias-label-secondary);background:0 0;border-radius:14px;flex:none;padding:0 9px;font-size:12px;line-height:18px}.Ewsqaa_dangerButton{color:var(--dsw-alias-state-error-primary)}.Ewsqaa_dangerButton:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover-danger)}.Ewsqaa_componentEditor,.Ewsqaa_sectionEditor{background:var(--dsw-alias-bg-module-platform);border-radius:10px;grid-template-columns:minmax(0,1fr) 120px minmax(150px,.6fr);gap:10px;margin-top:12px;padding:12px;display:grid}.Ewsqaa_field{flex-direction:column;gap:5px;display:flex}.Ewsqaa_templateField,.Ewsqaa_textField,.Ewsqaa_builtinTextField{grid-column:1/-1}.Ewsqaa_fieldLabel{color:var(--dsw-alias-label-secondary);font-size:12px;font-weight:500;line-height:18px}.Ewsqaa_input,.Ewsqaa_orderInput,.Ewsqaa_select,.Ewsqaa_textarea{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);width:100%;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);font:inherit;border-radius:8px;font-size:13px}.Ewsqaa_input,.Ewsqaa_orderInput,.Ewsqaa_select{height:32px;padding:0 9px}.Ewsqaa_textarea{resize:vertical;min-height:150px;padding:9px;line-height:20px}.Ewsqaa_input:disabled,.Ewsqaa_orderInput:disabled,.Ewsqaa_select:disabled,.Ewsqaa_textarea:disabled{cursor:default;opacity:.6}.Ewsqaa_excerpt,.Ewsqaa_builtinText{color:var(--dsw-alias-label-secondary);white-space:pre-wrap;margin-top:9px;font-size:12px;line-height:18px}.Ewsqaa_excerpt{-webkit-line-clamp:3;-webkit-box-orient:vertical;display:-webkit-box;overflow:hidden}.Ewsqaa_capturedText,.Ewsqaa_sourceDetails pre{color:var(--dsw-alias-label-secondary);white-space:pre-wrap;overflow-wrap:anywhere;margin:9px 0 0;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:19px}.Ewsqaa_sourceDetails{color:var(--dsw-alias-label-tertiary);margin-top:9px;font-size:12px;line-height:18px}.Ewsqaa_sourceDetails summary{cursor:pointer;width:fit-content}.Ewsqaa_resourceActions{flex-wrap:wrap;gap:6px;margin-top:10px;display:flex}.Ewsqaa_readonlyResource,.Ewsqaa_readonlyNotice{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}.Ewsqaa_readonlyResource{padding:5px 9px}.Ewsqaa_readonlyNotice{margin:8px 0 0}.Ewsqaa_resourceEditor{background:var(--dsw-alias-bg-module-platform);border-radius:10px;margin-top:10px;padding:12px}.Ewsqaa_resourceEditorHeader,.Ewsqaa_resourceEditorFooter{justify-content:space-between;align-items:center;gap:12px;display:flex}.Ewsqaa_resourceEditorHeader{color:var(--dsw-alias-label-primary);margin-bottom:8px;font-size:13px}.Ewsqaa_resourceEditorFooter{align-items:flex-start;margin-top:8px}.Ewsqaa_emptyText{margin-top:9px}.Ewsqaa_builtins{border-top:1px solid var(--dsw-alias-border-l2);margin-top:14px;padding-top:14px}.Ewsqaa_builtinsSummary{width:fit-content;color:var(--dsw-alias-label-secondary);cursor:pointer;border-radius:6px;align-items:center;gap:8px;font-size:14px;font-weight:500;line-height:22px;display:flex}.Ewsqaa_builtinsSummary .Ewsqaa_count{margin-left:4px}.Ewsqaa_builtinList{margin-top:10px}.Ewsqaa_builtinCard{background:var(--dsw-alias-bg-module-platform)}.Ewsqaa_origin{margin-top:5px}.Ewsqaa_assemblyOrder{background:var(--dsw-alias-bg-module-platform);border-radius:10px;flex-direction:column;gap:2px;max-height:190px;margin-bottom:12px;padding:8px;display:flex;overflow:auto}.Ewsqaa_assemblyOrder,.Ewsqaa_preview{--dsh-scrollbar-thumb:var(--dsw-alias-scrollbar-bg-l2);--dsh-scrollbar-thumb-hover:var(--dsw-alias-scrollbar-hover-l2)}.Ewsqaa_assemblyRow{min-height:24px;color:var(--dsw-alias-label-secondary);grid-template-columns:24px minmax(0,1fr) auto;align-items:center;gap:7px;font-size:12px;line-height:18px;display:grid}.Ewsqaa_assemblyIndex,.Ewsqaa_assemblyOrderValue{color:var(--dsw-alias-label-tertiary)}.Ewsqaa_preview{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);width:100%;min-height:320px;max-height:calc(100vh - 380px);color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-module-platform);white-space:pre-wrap;overflow-wrap:anywhere;border-radius:10px;margin:0;padding:14px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:19px;overflow:auto}@media (width<=1000px){.Ewsqaa_columns{grid-template-columns:1fr}.Ewsqaa_previewColumn{position:static}.Ewsqaa_preview{max-height:520px}}@media (width<=680px){.Ewsqaa_root{padding:16px}.Ewsqaa_pageHeader{flex-direction:column}.Ewsqaa_headerActions{width:100%}.Ewsqaa_primaryButton,.Ewsqaa_secondaryButton{flex:1}.Ewsqaa_rowHeader{flex-wrap:wrap}.Ewsqaa_sectionName{flex-basis:100%;order:-1}.Ewsqaa_orderBadge{margin-left:0}.Ewsqaa_componentEditor,.Ewsqaa_sectionEditor{grid-template-columns:1fr}.Ewsqaa_templateField,.Ewsqaa_textField,.Ewsqaa_builtinTextField{grid-column:auto}}.Ewsqaa_previewSystem{white-space:pre-wrap;overflow-wrap:anywhere;margin:0;padding:0}.Ewsqaa_previewSupplement{border:1px solid var(--dsw-alias-border-l2);border-left:3px solid var(--dsw-alias-brand-primary);background:var(--dsw-alias-interactive-bg-hover);border-radius:6px;margin:8px 0 0;padding:8px 10px}.Ewsqaa_previewCaptured{border:1px solid var(--dsw-alias-border-l2);border-left:3px solid var(--dsw-alias-state-warn-label);background:var(--dsw-alias-bg-module-platform);border-radius:6px;margin:8px 0 0;padding:8px 10px}.Ewsqaa_previewSupplementTag{color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-interactive-bg-hover);border-radius:4px;margin-bottom:4px;padding:0 6px;font-size:11px;line-height:18px;display:inline-block}.Ewsqaa_previewSupplementText{white-space:pre-wrap;overflow-wrap:anywhere;margin:0}";
 		const tagId = "dsh-prompt-studio/PromptStudioView.module.css";
 		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId) + "]") === null) {
 			const tag = document.createElement("style");
@@ -302,66 +412,75 @@ window.__ModuleLoader__.load({
 			document.head.appendChild(tag);
 		}
 		var PromptStudioView_module_css_default = {
-			"dangerButton": "Ewsqaa_dangerButton",
-			"kindBadge": "Ewsqaa_kindBadge",
-			"previewSupplementTag": "Ewsqaa_previewSupplementTag",
-			"intro": "Ewsqaa_intro",
-			"input": "Ewsqaa_input",
-			"sectionEditor": "Ewsqaa_sectionEditor",
-			"assemblyOrderValue": "Ewsqaa_assemblyOrderValue",
-			"orderBadge": "Ewsqaa_orderBadge",
-			"caption": "Ewsqaa_caption",
-			"origin": "Ewsqaa_origin",
-			"rowHeader": "Ewsqaa_rowHeader",
-			"empty": "Ewsqaa_empty",
-			"fieldLabel": "Ewsqaa_fieldLabel",
-			"builtins": "Ewsqaa_builtins",
-			"assemblyIndex": "Ewsqaa_assemblyIndex",
-			"pageHeader": "Ewsqaa_pageHeader",
-			"templateField": "Ewsqaa_templateField",
-			"componentList": "Ewsqaa_componentList",
-			"previewSupplementText": "Ewsqaa_previewSupplementText",
-			"textButton": "Ewsqaa_textButton",
-			"orderInput": "Ewsqaa_orderInput",
-			"primaryButton": "Ewsqaa_primaryButton",
-			"previewSupplement": "Ewsqaa_previewSupplement",
-			"stateBadge": "Ewsqaa_stateBadge",
+			"textField": "Ewsqaa_textField",
 			"textarea": "Ewsqaa_textarea",
+			"excerpt": "Ewsqaa_excerpt",
+			"kindBadge": "Ewsqaa_kindBadge",
+			"notice": "Ewsqaa_notice",
 			"field": "Ewsqaa_field",
+			"intro": "Ewsqaa_intro",
+			"readonlyResource": "Ewsqaa_readonlyResource",
+			"previewSystem": "Ewsqaa_previewSystem",
+			"previewSupplementTag": "Ewsqaa_previewSupplementTag",
+			"builtinList": "Ewsqaa_builtinList",
 			"error": "Ewsqaa_error",
+			"secondaryButton": "Ewsqaa_secondaryButton",
+			"sectionEditor": "Ewsqaa_sectionEditor",
+			"templateField": "Ewsqaa_templateField",
+			"textButton": "Ewsqaa_textButton",
+			"assemblyOrderValue": "Ewsqaa_assemblyOrderValue",
+			"readonlyNotice": "Ewsqaa_readonlyNotice",
 			"userCard": "Ewsqaa_userCard",
+			"subtitle": "Ewsqaa_subtitle",
+			"previewSupplement": "Ewsqaa_previewSupplement",
+			"resourceEditor": "Ewsqaa_resourceEditor",
+			"input": "Ewsqaa_input",
+			"preview": "Ewsqaa_preview",
+			"builtins": "Ewsqaa_builtins",
+			"status": "Ewsqaa_status",
+			"emptyText": "Ewsqaa_emptyText",
+			"componentList": "Ewsqaa_componentList",
+			"primaryButton": "Ewsqaa_primaryButton",
+			"sourceDetails": "Ewsqaa_sourceDetails",
+			"capturedText": "Ewsqaa_capturedText",
+			"sectionName": "Ewsqaa_sectionName",
+			"fieldLabel": "Ewsqaa_fieldLabel",
+			"resourceActions": "Ewsqaa_resourceActions",
+			"dangerButton": "Ewsqaa_dangerButton",
+			"caption": "Ewsqaa_caption",
+			"builtinText": "Ewsqaa_builtinText",
+			"origin": "Ewsqaa_origin",
+			"stateBadge": "Ewsqaa_stateBadge",
+			"userList": "Ewsqaa_userList",
+			"rowHeader": "Ewsqaa_rowHeader",
+			"previewCaptured": "Ewsqaa_previewCaptured",
+			"builtinCard": "Ewsqaa_builtinCard",
+			"resourceEditorFooter": "Ewsqaa_resourceEditorFooter",
+			"roleBadge": "Ewsqaa_roleBadge",
+			"assemblyOrder": "Ewsqaa_assemblyOrder",
+			"assemblyIndex": "Ewsqaa_assemblyIndex",
+			"editorColumn": "Ewsqaa_editorColumn",
+			"orderBadge": "Ewsqaa_orderBadge",
+			"select": "Ewsqaa_select",
+			"title": "Ewsqaa_title",
 			"columns": "Ewsqaa_columns",
 			"positionBadge": "Ewsqaa_positionBadge",
-			"select": "Ewsqaa_select",
-			"previewColumn": "Ewsqaa_previewColumn",
-			"sectionName": "Ewsqaa_sectionName",
-			"roleBadge": "Ewsqaa_roleBadge",
-			"secondaryButton": "Ewsqaa_secondaryButton",
-			"sectionHeading": "Ewsqaa_sectionHeading",
-			"builtinCard": "Ewsqaa_builtinCard",
+			"componentCard": "Ewsqaa_componentCard",
+			"previewSupplementText": "Ewsqaa_previewSupplementText",
+			"componentEditor": "Ewsqaa_componentEditor",
+			"count": "Ewsqaa_count",
+			"pageHeader": "Ewsqaa_pageHeader",
+			"headerActions": "Ewsqaa_headerActions",
+			"orderInput": "Ewsqaa_orderInput",
+			"builtinsSummary": "Ewsqaa_builtinsSummary",
+			"empty": "Ewsqaa_empty",
 			"root": "Ewsqaa_root",
 			"builtinTextField": "Ewsqaa_builtinTextField",
-			"componentCard": "Ewsqaa_componentCard",
-			"userList": "Ewsqaa_userList",
+			"resourceEditorHeader": "Ewsqaa_resourceEditorHeader",
+			"sectionHeading": "Ewsqaa_sectionHeading",
 			"enabledControl": "Ewsqaa_enabledControl",
-			"status": "Ewsqaa_status",
-			"componentEditor": "Ewsqaa_componentEditor",
-			"previewSystem": "Ewsqaa_previewSystem",
-			"subtitle": "Ewsqaa_subtitle",
-			"preview": "Ewsqaa_preview",
-			"builtinText": "Ewsqaa_builtinText",
-			"emptyText": "Ewsqaa_emptyText",
-			"textField": "Ewsqaa_textField",
-			"title": "Ewsqaa_title",
-			"headerActions": "Ewsqaa_headerActions",
 			"assemblyRow": "Ewsqaa_assemblyRow",
-			"editorColumn": "Ewsqaa_editorColumn",
-			"count": "Ewsqaa_count",
-			"assemblyOrder": "Ewsqaa_assemblyOrder",
-			"notice": "Ewsqaa_notice",
-			"builtinsSummary": "Ewsqaa_builtinsSummary",
-			"builtinList": "Ewsqaa_builtinList",
-			"excerpt": "Ewsqaa_excerpt"
+			"previewColumn": "Ewsqaa_previewColumn"
 		};
 		//#endregion
 		//#region src/client/PromptStudioView.tsx
@@ -391,28 +510,234 @@ window.__ModuleLoader__.load({
 		function messageOf(error) {
 			return error instanceof Error ? error.message : String(error);
 		}
-		function compareRows(left, right) {
-			return (left.component.role === "system" ? -1 : POSITION_ORDER[left.component.position ?? "tail"]) - (right.component.role === "system" ? -1 : POSITION_ORDER[right.component.position ?? "tail"]) || left.component.order - right.component.order;
+		function rowPlacement(row) {
+			if (row.type === "captured") return 1;
+			if (row.component.role === "system") return 0;
+			return 2 + POSITION_ORDER[row.component.position ?? "tail"];
 		}
-		function previewText(systemText, supplements) {
+		function compareRows(left, right) {
+			return rowPlacement(left) - rowPlacement(right) || left.component.order - right.component.order;
+		}
+		function previewText(systemText, supplements, captured, userAnchor) {
 			const blocks = [];
 			if (systemText.length > 0) blocks.push({
 				kind: "system",
 				text: systemText
 			});
-			const sortedSupplements = supplements.map((component, declaration) => ({
-				component,
-				declaration
-			})).sort((left, right) => POSITION_ORDER[left.component.position ?? "tail"] - POSITION_ORDER[right.component.position ?? "tail"] || left.component.order - right.component.order || left.declaration - right.declaration);
-			for (const { component } of sortedSupplements) blocks.push({
-				kind: "supplement",
-				id: component.id,
-				text: component.template
-			});
+			const appendSupplements = (position) => {
+				for (const component of supplements.filter((item) => item.position === position)) blocks.push({
+					kind: "supplement",
+					id: component.id,
+					text: component.template
+				});
+			};
+			const appendCaptured = (items) => {
+				for (const component of items) blocks.push({
+					kind: "captured",
+					id: component.id,
+					text: component.template,
+					label: `${component.producer}${component.form === void 0 ? "" : ` · ${component.form}`} · 消息 ${String(component.order + 1)}`
+				});
+			};
+			appendSupplements("after_system");
+			const orderedCaptured = [...captured].sort((left, right) => left.order - right.order);
+			if (userAnchor === null) appendCaptured(orderedCaptured);
+			else {
+				appendCaptured(orderedCaptured.filter((component) => component.order <= userAnchor));
+				appendSupplements("anchored");
+				appendCaptured(orderedCaptured.filter((component) => component.order > userAnchor));
+			}
+			appendSupplements("tail");
 			return blocks;
 		}
+		function CapturedComponentCard({ component, controller }) {
+			const [expanded, setExpanded] = (0, react.useState)(false);
+			const [loadingResource, setLoadingResource] = (0, react.useState)(null);
+			const [draft, setDraft] = (0, react.useState)(null);
+			const editResource = (resource) => {
+				if (!resource.editable || loadingResource !== null) return;
+				setLoadingResource(resource.id);
+				setDraft(null);
+				controller.loadResource(component.id, resource.id).then((snapshot) => {
+					setDraft({
+						resource,
+						content: snapshot.content,
+						digest: snapshot.digest,
+						saving: false,
+						saved: false,
+						error: null
+					});
+				}).catch((error) => {
+					setDraft({
+						resource,
+						content: "",
+						digest: "",
+						saving: false,
+						saved: false,
+						error: messageOf(error)
+					});
+				}).finally(() => {
+					setLoadingResource(null);
+				});
+			};
+			const saveResource = () => {
+				if (draft === null || draft.saving || draft.digest.length === 0) return;
+				setDraft((current) => current === null ? null : {
+					...current,
+					saving: true,
+					saved: false,
+					error: null
+				});
+				controller.saveResource(component.id, draft.resource.id, draft.content, draft.digest).then((snapshot) => {
+					setDraft((current) => current === null ? null : {
+						...current,
+						content: snapshot.content,
+						digest: snapshot.digest,
+						saving: false,
+						saved: true,
+						error: null
+					});
+				}).catch((error) => {
+					setDraft((current) => current === null ? null : {
+						...current,
+						saving: false,
+						saved: false,
+						error: messageOf(error)
+					});
+				});
+			};
+			const sourceLabel = `${component.producer} · kind=${component.sourceKind}${component.form === void 0 ? "" : ` · form=${component.form}`}`;
+			const editable = component.resources.filter((resource) => resource.editable);
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("li", {
+				className: PromptStudioView_module_css_default["componentCard"],
+				"aria-label": `捕获上下文 ${component.id}`,
+				children: [
+					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+						className: PromptStudioView_module_css_default["rowHeader"],
+						children: [
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+								className: PromptStudioView_module_css_default["stateBadge"],
+								children: "自动捕获"
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+								className: PromptStudioView_module_css_default["kindBadge"],
+								children: "上下文"
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+								className: PromptStudioView_module_css_default["sectionName"],
+								children: sourceLabel
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+								className: PromptStudioView_module_css_default["roleBadge"],
+								children: component.role
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
+								className: PromptStudioView_module_css_default["orderBadge"],
+								children: ["消息位置 ", String(component.order + 1)]
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+								type: "button",
+								className: PromptStudioView_module_css_default["textButton"],
+								onClick: () => {
+									setExpanded((value) => !value);
+								},
+								children: expanded ? "收起" : "查看"
+							})
+						]
+					}),
+					component.summary === void 0 ? null : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+						className: PromptStudioView_module_css_default["origin"],
+						children: component.summary
+					}),
+					expanded ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("pre", {
+						className: PromptStudioView_module_css_default["capturedText"],
+						children: component.template
+					}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("details", {
+						className: PromptStudioView_module_css_default["sourceDetails"],
+						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("summary", { children: "来源元数据" }), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("pre", { children: JSON.stringify(component.source, null, 2) })]
+					})] }) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+						className: PromptStudioView_module_css_default["excerpt"],
+						children: component.template || "（空内容）"
+					}),
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+						className: PromptStudioView_module_css_default["resourceActions"],
+						children: component.resources.map((resource) => resource.editable ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+							type: "button",
+							className: PromptStudioView_module_css_default["textButton"],
+							disabled: loadingResource !== null,
+							onClick: () => {
+								editResource(resource);
+							},
+							children: loadingResource === resource.id ? "正在读取…" : `编辑文件：${resource.path}`
+						}, resource.id) : /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
+							className: PromptStudioView_module_css_default["readonlyResource"],
+							children: [
+								resource.path,
+								"（",
+								resource.action === "remove" ? "已移除" : "只读",
+								"）"
+							]
+						}, resource.id))
+					}),
+					editable.length === 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+						className: PromptStudioView_module_css_default["readonlyNotice"],
+						children: "只读捕获：来源没有提供可解析的文件变更。"
+					}) : null,
+					draft === null ? null : /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+						className: PromptStudioView_module_css_default["resourceEditor"],
+						"aria-label": `编辑上下文文件 ${draft.resource.path}`,
+						children: [
+							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+								className: PromptStudioView_module_css_default["resourceEditorHeader"],
+								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("strong", { children: draft.resource.path }), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+									type: "button",
+									className: PromptStudioView_module_css_default["textButton"],
+									onClick: () => {
+										setDraft(null);
+									},
+									children: "关闭"
+								})]
+							}),
+							draft.error === null ? null : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+								className: PromptStudioView_module_css_default["error"],
+								children: draft.error
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("textarea", {
+								className: PromptStudioView_module_css_default["textarea"],
+								value: draft.content,
+								disabled: draft.digest.length === 0 || draft.saving,
+								rows: 12,
+								onChange: (event) => {
+									setDraft((current) => current === null ? null : {
+										...current,
+										content: event.target.value,
+										saved: false
+									});
+								}
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+								className: PromptStudioView_module_css_default["resourceEditorFooter"],
+								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+									className: PromptStudioView_module_css_default["caption"],
+									children: draft.saved ? "已写回；下一轮请求仍由原上下文生产者按其状态机协调。" : "保存只修改来源文件，不改写已进入会话的上下文事件。"
+								}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+									type: "button",
+									className: PromptStudioView_module_css_default["primaryButton"],
+									disabled: draft.digest.length === 0 || draft.saving,
+									onClick: saveResource,
+									children: draft.saving ? "正在写回…" : "写回文件"
+								})]
+							})
+						]
+					})
+				]
+			});
+		}
 		/** Conversation-view entry point. */
-		function PromptStudioView({ controller, useSnapshot }) {
+		function PromptStudioView({ controller, useSnapshot, useSession }) {
+			(0, react.useEffect)(() => {
+				controller.load();
+			}, [controller, useSession((snapshot) => `${String(snapshot.nodes.length)}:${snapshot.running ? "running" : "idle"}`)]);
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(PromptStudioSurface, {
 				controller,
 				useSnapshot
@@ -420,6 +745,9 @@ window.__ModuleLoader__.load({
 		}
 		/** Settings-page entry point sharing the exact live editor state. */
 		function PromptStudioSettingsSection({ controller, useSnapshot }) {
+			(0, react.useEffect)(() => {
+				controller.load();
+			}, [controller]);
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(PromptStudioSurface, {
 				controller,
 				useSnapshot
@@ -427,9 +755,6 @@ window.__ModuleLoader__.load({
 		}
 		function PromptStudioSurface({ controller, useSnapshot }) {
 			const remote = useSnapshot((state) => state);
-			(0, react.useEffect)(() => {
-				if (remote.status === "idle") controller.load();
-			}, [controller, remote.status]);
 			if (remote.status === "idle" || remote.status === "loading" && remote.native.length === 0) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 				className: PromptStudioView_module_css_default["status"],
 				children: "正在载入 Prompt Studio…"
@@ -470,13 +795,25 @@ window.__ModuleLoader__.load({
 				remote.components,
 				remote.revision
 			]);
-			const rows = (0, react.useMemo)(() => [...remote.native.map((component) => ({
-				component,
-				configuredIndex: null
-			})), ...draft.map((component, configuredIndex) => ({
-				component,
-				configuredIndex
-			}))].sort(compareRows), [draft, remote.native]);
+			const rows = (0, react.useMemo)(() => [
+				...remote.native.map((component) => ({
+					type: "native",
+					component
+				})),
+				...remote.captured.map((component) => ({
+					type: "captured",
+					component
+				})),
+				...draft.map((component, configuredIndex) => ({
+					type: "configured",
+					component,
+					configuredIndex
+				}))
+			].sort(compareRows), [
+				draft,
+				remote.captured,
+				remote.native
+			]);
 			const draftSystem = (0, react.useMemo)(() => dirty ? buildDraftSystemComponents(remote.native, draft) : copyComponents(remote.assembled), [
 				dirty,
 				draft,
@@ -492,7 +829,12 @@ window.__ModuleLoader__.load({
 				declaration
 			})).sort((left, right) => POSITION_ORDER[left.component.position ?? "tail"] - POSITION_ORDER[right.component.position ?? "tail"] || left.component.order - right.component.order || left.declaration - right.declaration).map((entry) => entry.component), [requestSupplements]);
 			const systemContent = (0, react.useMemo)(() => renderSystemPreview(draftSystem), [draftSystem]);
-			const preview = (0, react.useMemo)(() => previewText(systemContent, orderedRequestSupplements), [orderedRequestSupplements, systemContent]);
+			const preview = (0, react.useMemo)(() => previewText(systemContent, orderedRequestSupplements, remote.captured, remote.userAnchor), [
+				orderedRequestSupplements,
+				remote.captured,
+				remote.userAnchor,
+				systemContent
+			]);
 			const changeComponent = (index, patch) => {
 				setDraft((current) => current.map((component, position) => position === index ? {
 					...component,
@@ -638,9 +980,15 @@ window.__ModuleLoader__.load({
 								})]
 							}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("ol", {
 								className: PromptStudioView_module_css_default["componentList"],
-								children: rows.map(({ component, configuredIndex }) => {
-									const isNative = configuredIndex === null;
-									const editing = configuredIndex !== null && editingIndex === configuredIndex;
+								children: rows.map((row) => {
+									if (row.type === "captured") return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(CapturedComponentCard, {
+										component: row.component,
+										controller
+									}, row.component.id);
+									const { component } = row;
+									const configuredIndex = row.type === "configured" ? row.configuredIndex : -1;
+									const isNative = row.type === "native";
+									const editing = !isNative && editingIndex === configuredIndex;
 									const override = isNativeOverride(component);
 									const overrideExists = isNative && draft.some((item) => isNativeOverride(item) && item.origin === component.id);
 									return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("li", {
@@ -717,7 +1065,7 @@ window.__ModuleLoader__.load({
 												className: PromptStudioView_module_css_default["origin"],
 												children: ["覆盖目标：", component.origin]
 											}) : null,
-											editing && configuredIndex !== null ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+											editing ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 												className: PromptStudioView_module_css_default["componentEditor"],
 												children: [
 													/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("label", {
@@ -862,38 +1210,25 @@ window.__ModuleLoader__.load({
 										children: "完整预览"
 									}) }), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 										className: PromptStudioView_module_css_default["count"],
-										children: String((systemContent.length > 0 ? 1 : 0) + orderedRequestSupplements.length)
+										children: String(preview.length)
 									})]
 								}),
-								/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 									className: PromptStudioView_module_css_default["assemblyOrder"],
-									children: [systemContent.length > 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
+									children: preview.map((block, index) => /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
 										className: PromptStudioView_module_css_default["assemblyRow"],
 										children: [
 											/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 												className: PromptStudioView_module_css_default["assemblyIndex"],
-												children: "1"
+												children: String(index + 1)
 											}),
-											/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: "system" }),
-											/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
-												className: PromptStudioView_module_css_default["assemblyOrderValue"],
-												children: [String(draftSystem.length), " 个 section 合并"]
-											})
-										]
-									}) : null, orderedRequestSupplements.map((component, index) => /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
-										className: PromptStudioView_module_css_default["assemblyRow"],
-										children: [
-											/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-												className: PromptStudioView_module_css_default["assemblyIndex"],
-												children: String(index + (systemContent.length > 0 ? 2 : 1))
-											}),
-											/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: component.role }),
+											/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: block.kind === "system" ? "system" : block.kind === "captured" ? "自动捕获" : "补充" }),
 											/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 												className: PromptStudioView_module_css_default["assemblyOrderValue"],
-												children: component.position === void 0 ? "" : POSITION_LABEL[component.position]
+												children: block.label ?? (block.kind === "system" ? `${String(draftSystem.length)} 个 section 合并` : "")
 											})
 										]
-									}, `supplement:${component.id}`))]
+									}, `layout:${block.kind}:${block.id ?? "system"}:${String(index)}`))
 								}),
 								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 									className: PromptStudioView_module_css_default["preview"],
@@ -901,15 +1236,15 @@ window.__ModuleLoader__.load({
 										className: PromptStudioView_module_css_default["previewSystem"],
 										children: block.text
 									}, `system:${index}`) : /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-										className: PromptStudioView_module_css_default["previewSupplement"],
+										className: block.kind === "captured" ? PromptStudioView_module_css_default["previewCaptured"] : PromptStudioView_module_css_default["previewSupplement"],
 										children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 											className: PromptStudioView_module_css_default["previewSupplementTag"],
-											children: "补充"
+											children: block.kind === "captured" ? block.label : "补充"
 										}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("pre", {
 											className: PromptStudioView_module_css_default["previewSupplementText"],
 											children: block.text
 										})]
-									}, `supplement:${block.id}:${index}`))
+									}, `${block.kind}:${block.id}:${index}`))
 								})
 							]
 						})]
@@ -927,15 +1262,22 @@ window.__ModuleLoader__.load({
 		];
 		/** Register the tab, its shared controller, and pushed invalidations. */
 		function apply(ctx) {
-			const controller = new PromptStudioStore();
-			const useSnapshot = (0, _deepseek_ai_dsh_client_web_react.bindSnapshotSelector)(controller.store);
-			const injected = () => ({
-				controller,
-				useSnapshot
-			});
+			const faces = /* @__PURE__ */ new Map();
+			const faceFor = (sessionId) => {
+				const key = sessionId === void 0 ? "" : String(sessionId);
+				let face = faces.get(key);
+				if (face !== void 0) return face;
+				const controller = new PromptStudioStore(key.length === 0 ? void 0 : key);
+				face = {
+					controller,
+					useSnapshot: (0, _deepseek_ai_dsh_client_web_react.bindSnapshotSelector)(controller.store)
+				};
+				faces.set(key, face);
+				return face;
+			};
 			ctx.effect(() => {
 				const refresh = () => {
-					refreshIfLoaded(controller);
+					for (const { controller } of faces.values()) refreshIfLoaded(controller);
 				};
 				const disposers = [ctx.on("settings/changed", (namespace) => {
 					if (namespace === "prompt-studio") refresh();
@@ -949,14 +1291,14 @@ window.__ModuleLoader__.load({
 				id: "prompt-studio",
 				order: 20,
 				label: "Prompt Studio",
-				inject: injected
+				inject: (sessionId) => faceFor(sessionId)
 			}, PromptStudioView);
 			ctx.slots.inject("settings.section", () => ctx.slots.register({
 				name: "settings.section",
 				id: "prompt-studio",
 				order: 20,
 				label: "Prompt Studio",
-				inject: injected
+				inject: () => faceFor()
 			}, PromptStudioSettingsSection));
 		}
 		//#endregion

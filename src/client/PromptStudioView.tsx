@@ -10,6 +10,8 @@ import {
   nextOverrideId,
   nextSupplementId,
   renderSystemPreview,
+  type CapturedContextResource,
+  type CapturedPromptComponent,
   type PromptComponent,
   type PromptComponentKind,
   type PromptComponentPosition,
@@ -31,10 +33,10 @@ export type PromptStudioViewProps = ConvViewProps & InjectFace<PromptStudioViewI
 export type PromptStudioSettingsSectionProps =
   PropsRuntime<'settings.section'> & InjectFace<PromptStudioViewInjected>
 
-interface DisplayRow {
-  component: PromptComponent
-  configuredIndex: number | null
-}
+type DisplayRow =
+  | { type: 'native'; component: PromptComponent }
+  | { type: 'captured'; component: CapturedPromptComponent }
+  | { type: 'configured'; component: PromptComponent; configuredIndex: number }
 
 const POSITION_ORDER: Record<PromptComponentPosition, number> = {
   after_system: 0,
@@ -67,39 +69,207 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+function rowPlacement(row: DisplayRow): number {
+  if (row.type === 'captured') return 1
+  if (row.component.role === 'system') return 0
+  return 2 + POSITION_ORDER[row.component.position ?? 'tail']
+}
+
 function compareRows(left: DisplayRow, right: DisplayRow): number {
-  const leftPlacement = left.component.role === 'system'
-    ? -1
-    : POSITION_ORDER[left.component.position ?? 'tail']
-  const rightPlacement = right.component.role === 'system'
-    ? -1
-    : POSITION_ORDER[right.component.position ?? 'tail']
+  const leftPlacement = rowPlacement(left)
+  const rightPlacement = rowPlacement(right)
   return leftPlacement - rightPlacement
     || left.component.order - right.component.order
 }
 
 interface PreviewBlock {
-  kind: 'system' | 'supplement'
+  kind: 'system' | 'captured' | 'supplement'
   id?: string
   text: string
+  label?: string
 }
 
-function previewText(systemText: string, supplements: readonly PromptComponent[]): PreviewBlock[] {
+function previewText(
+  systemText: string,
+  supplements: readonly PromptComponent[],
+  captured: readonly CapturedPromptComponent[],
+  userAnchor: number | null,
+): PreviewBlock[] {
   const blocks: PreviewBlock[] = []
   if (systemText.length > 0) blocks.push({ kind: 'system', text: systemText })
-  const sortedSupplements = supplements
-    .map((component, declaration) => ({ component, declaration }))
-    .sort((left, right) => POSITION_ORDER[left.component.position ?? 'tail'] - POSITION_ORDER[right.component.position ?? 'tail']
-      || left.component.order - right.component.order
-      || left.declaration - right.declaration)
-  for (const { component } of sortedSupplements) {
-    blocks.push({ kind: 'supplement', id: component.id, text: component.template })
+  const appendSupplements = (position: PromptComponentPosition): void => {
+    for (const component of supplements.filter(item => item.position === position)) {
+      blocks.push({ kind: 'supplement', id: component.id, text: component.template })
+    }
   }
+  const appendCaptured = (items: readonly CapturedPromptComponent[]): void => {
+    for (const component of items) {
+      blocks.push({
+        kind: 'captured',
+        id: component.id,
+        text: component.template,
+        label: `${component.producer}${component.form === undefined ? '' : ` · ${component.form}`} · 消息 ${String(component.order + 1)}`,
+      })
+    }
+  }
+  appendSupplements('after_system')
+  const orderedCaptured = [...captured].sort((left, right) => left.order - right.order)
+  if (userAnchor === null) {
+    appendCaptured(orderedCaptured)
+  } else {
+    appendCaptured(orderedCaptured.filter(component => component.order <= userAnchor))
+    appendSupplements('anchored')
+    appendCaptured(orderedCaptured.filter(component => component.order > userAnchor))
+  }
+  appendSupplements('tail')
   return blocks
 }
 
+interface ResourceDraft {
+  resource: CapturedContextResource
+  content: string
+  digest: string
+  saving: boolean
+  saved: boolean
+  error: string | null
+}
+
+function CapturedComponentCard({
+  component,
+  controller,
+}: {
+  component: CapturedPromptComponent
+  controller: PromptStudioStore
+}): ReactNode {
+  const [expanded, setExpanded] = useState(false)
+  const [loadingResource, setLoadingResource] = useState<string | null>(null)
+  const [draft, setDraft] = useState<ResourceDraft | null>(null)
+
+  const editResource = (resource: CapturedContextResource): void => {
+    if (!resource.editable || loadingResource !== null) return
+    setLoadingResource(resource.id)
+    setDraft(null)
+    void controller.loadResource(component.id, resource.id)
+      .then((snapshot) => {
+        setDraft({
+          resource,
+          content: snapshot.content,
+          digest: snapshot.digest,
+          saving: false,
+          saved: false,
+          error: null,
+        })
+      })
+      .catch((error: unknown) => {
+        setDraft({ resource, content: '', digest: '', saving: false, saved: false, error: messageOf(error) })
+      })
+      .finally(() => { setLoadingResource(null) })
+  }
+
+  const saveResource = (): void => {
+    if (draft === null || draft.saving || draft.digest.length === 0) return
+    setDraft(current => current === null ? null : { ...current, saving: true, saved: false, error: null })
+    void controller.saveResource(component.id, draft.resource.id, draft.content, draft.digest)
+      .then((snapshot) => {
+        setDraft(current => current === null ? null : {
+          ...current,
+          content: snapshot.content,
+          digest: snapshot.digest,
+          saving: false,
+          saved: true,
+          error: null,
+        })
+      })
+      .catch((error: unknown) => {
+        setDraft(current => current === null ? null : { ...current, saving: false, saved: false, error: messageOf(error) })
+      })
+  }
+
+  const sourceLabel = `${component.producer} · kind=${component.sourceKind}${component.form === undefined ? '' : ` · form=${component.form}`}`
+  const editable = component.resources.filter(resource => resource.editable)
+  return (
+    <li className={styles['componentCard']} aria-label={`捕获上下文 ${component.id}`}>
+      <div className={styles['rowHeader']}>
+        <span className={styles['stateBadge']}>自动捕获</span>
+        <span className={styles['kindBadge']}>上下文</span>
+        <span className={styles['sectionName']}>{sourceLabel}</span>
+        <span className={styles['roleBadge']}>{component.role}</span>
+        <span className={styles['orderBadge']}>消息位置 {String(component.order + 1)}</span>
+        <button type="button" className={styles['textButton']} onClick={() => { setExpanded(value => !value) }}>
+          {expanded ? '收起' : '查看'}
+        </button>
+      </div>
+      {component.summary === undefined ? null : <p className={styles['origin']}>{component.summary}</p>}
+      {expanded
+        ? (
+          <>
+            <pre className={styles['capturedText']}>{component.template}</pre>
+            <details className={styles['sourceDetails']}>
+              <summary>来源元数据</summary>
+              <pre>{JSON.stringify(component.source, null, 2)}</pre>
+            </details>
+          </>
+        )
+        : <p className={styles['excerpt']}>{component.template || '（空内容）'}</p>}
+      <div className={styles['resourceActions']}>
+        {component.resources.map(resource => resource.editable
+          ? (
+            <button
+              key={resource.id}
+              type="button"
+              className={styles['textButton']}
+              disabled={loadingResource !== null}
+              onClick={() => { editResource(resource) }}
+            >
+              {loadingResource === resource.id ? '正在读取…' : `编辑文件：${resource.path}`}
+            </button>
+          )
+          : <span key={resource.id} className={styles['readonlyResource']}>{resource.path}（{resource.action === 'remove' ? '已移除' : '只读'}）</span>)}
+      </div>
+      {editable.length === 0
+        ? <p className={styles['readonlyNotice']}>只读捕获：来源没有提供可解析的文件变更。</p>
+        : null}
+      {draft === null
+        ? null
+        : (
+          <div className={styles['resourceEditor']} aria-label={`编辑上下文文件 ${draft.resource.path}`}>
+            <div className={styles['resourceEditorHeader']}>
+              <strong>{draft.resource.path}</strong>
+              <button type="button" className={styles['textButton']} onClick={() => { setDraft(null) }}>关闭</button>
+            </div>
+            {draft.error === null ? null : <p className={styles['error']}>{draft.error}</p>}
+            <textarea
+              className={styles['textarea']}
+              value={draft.content}
+              disabled={draft.digest.length === 0 || draft.saving}
+              rows={12}
+              onChange={(event) => {
+                setDraft(current => current === null ? null : { ...current, content: event.target.value, saved: false })
+              }}
+            />
+            <div className={styles['resourceEditorFooter']}>
+              <span className={styles['caption']}>
+                {draft.saved ? '已写回；下一轮请求仍由原上下文生产者按其状态机协调。' : '保存只修改来源文件，不改写已进入会话的上下文事件。'}
+              </span>
+              <button
+                type="button"
+                className={styles['primaryButton']}
+                disabled={draft.digest.length === 0 || draft.saving}
+                onClick={saveResource}
+              >
+                {draft.saving ? '正在写回…' : '写回文件'}
+              </button>
+            </div>
+          </div>
+        )}
+    </li>
+  )
+}
+
 /** Conversation-view entry point. */
-export function PromptStudioView({ controller, useSnapshot }: PromptStudioViewProps): ReactNode {
+export function PromptStudioView({ controller, useSnapshot, useSession }: PromptStudioViewProps): ReactNode {
+  const requestVersion = useSession(snapshot => `${String(snapshot.nodes.length)}:${snapshot.running ? 'running' : 'idle'}`)
+  useEffect(() => { void controller.load() }, [controller, requestVersion])
   return <PromptStudioSurface controller={controller} useSnapshot={useSnapshot} />
 }
 
@@ -108,15 +278,12 @@ export function PromptStudioSettingsSection({
   controller,
   useSnapshot,
 }: PromptStudioSettingsSectionProps): ReactNode {
+  useEffect(() => { void controller.load() }, [controller])
   return <PromptStudioSurface controller={controller} useSnapshot={useSnapshot} />
 }
 
 function PromptStudioSurface({ controller, useSnapshot }: InjectFace<PromptStudioViewInjected>): ReactNode {
   const remote = useSnapshot(state => state)
-
-  useEffect(() => {
-    if (remote.status === 'idle') void controller.load()
-  }, [controller, remote.status])
 
   if (remote.status === 'idle' || (remote.status === 'loading' && remote.native.length === 0)) {
     return <div className={styles['status']}>正在载入 Prompt Studio…</div>
@@ -156,9 +323,10 @@ function PromptStudioEditor({
   }, [remote.catalogRevision, remote.components, remote.revision])
 
   const rows = useMemo<DisplayRow[]>(() => [
-    ...remote.native.map(component => ({ component, configuredIndex: null })),
-    ...draft.map((component, configuredIndex) => ({ component, configuredIndex })),
-  ].sort(compareRows), [draft, remote.native])
+    ...remote.native.map(component => ({ type: 'native' as const, component })),
+    ...remote.captured.map(component => ({ type: 'captured' as const, component })),
+    ...draft.map((component, configuredIndex) => ({ type: 'configured' as const, component, configuredIndex })),
+  ].sort(compareRows), [draft, remote.captured, remote.native])
 
   const draftSystem = useMemo(
     () => dirty ? buildDraftSystemComponents(remote.native, draft) : copyComponents(remote.assembled),
@@ -178,8 +346,8 @@ function PromptStudioEditor({
     .map(entry => entry.component), [requestSupplements])
   const systemContent = useMemo(() => renderSystemPreview(draftSystem), [draftSystem])
   const preview = useMemo(
-    () => previewText(systemContent, orderedRequestSupplements),
-    [orderedRequestSupplements, systemContent],
+    () => previewText(systemContent, orderedRequestSupplements, remote.captured, remote.userAnchor),
+    [orderedRequestSupplements, remote.captured, remote.userAnchor, systemContent],
   )
 
   const changeComponent = (index: number, patch: Partial<PromptComponent>): void => {
@@ -312,9 +480,14 @@ function PromptStudioEditor({
           </div>
 
           <ol className={styles['componentList']}>
-            {rows.map(({ component, configuredIndex }) => {
-              const isNative = configuredIndex === null
-              const editing = configuredIndex !== null && editingIndex === configuredIndex
+            {rows.map((row) => {
+              if (row.type === 'captured') {
+                return <CapturedComponentCard key={row.component.id} component={row.component} controller={controller} />
+              }
+              const { component } = row
+              const configuredIndex = row.type === 'configured' ? row.configuredIndex : -1
+              const isNative = row.type === 'native'
+              const editing = !isNative && editingIndex === configuredIndex
               const override = isNativeOverride(component)
               const overrideExists = isNative && draft.some(item => isNativeOverride(item) && item.origin === component.id)
               return (
@@ -378,7 +551,7 @@ function PromptStudioEditor({
                     ? <p className={styles['origin']}>覆盖目标：{component.origin}</p>
                     : null}
 
-                  {editing && configuredIndex !== null
+                  {editing
                     ? (
                       <div className={styles['componentEditor']}>
                         <label className={styles['field']}>
@@ -486,28 +659,15 @@ function PromptStudioEditor({
 
             </div>
             <span className={styles['count']}>
-              {String((systemContent.length > 0 ? 1 : 0) + orderedRequestSupplements.length)}
+              {String(preview.length)}
             </span>
           </div>
           <div className={styles['assemblyOrder']}>
-            {systemContent.length > 0
-              ? (
-                <span className={styles['assemblyRow']}>
-                  <span className={styles['assemblyIndex']}>1</span>
-                  <span>system</span>
-                  <span className={styles['assemblyOrderValue']}>{String(draftSystem.length)} 个 section 合并</span>
-                </span>
-              )
-              : null}
-            {orderedRequestSupplements.map((component, index) => (
-              <span key={`supplement:${component.id}`} className={styles['assemblyRow']}>
-                <span className={styles['assemblyIndex']}>
-                  {String(index + (systemContent.length > 0 ? 2 : 1))}
-                </span>
-                <span>{component.role}</span>
-                <span className={styles['assemblyOrderValue']}>
-                  {component.position === undefined ? '' : POSITION_LABEL[component.position]}
-                </span>
+            {preview.map((block, index) => (
+              <span key={`layout:${block.kind}:${block.id ?? 'system'}:${String(index)}`} className={styles['assemblyRow']}>
+                <span className={styles['assemblyIndex']}>{String(index + 1)}</span>
+                <span>{block.kind === 'system' ? 'system' : block.kind === 'captured' ? '自动捕获' : '补充'}</span>
+                <span className={styles['assemblyOrderValue']}>{block.label ?? (block.kind === 'system' ? `${String(draftSystem.length)} 个 section 合并` : '')}</span>
               </span>
             ))}
           </div>
@@ -516,8 +676,8 @@ function PromptStudioEditor({
               block.kind === 'system'
                 ? <pre key={`system:${index}`} className={styles['previewSystem']}>{block.text}</pre>
                 : (
-                  <div key={`supplement:${block.id}:${index}`} className={styles['previewSupplement']}>
-                    <span className={styles['previewSupplementTag']}>补充</span>
+                  <div key={`${block.kind}:${block.id}:${index}`} className={block.kind === 'captured' ? styles['previewCaptured'] : styles['previewSupplement']}>
+                    <span className={styles['previewSupplementTag']}>{block.kind === 'captured' ? block.label : '补充'}</span>
                     <pre className={styles['previewSupplementText']}>{block.text}</pre>
                   </div>
                 )

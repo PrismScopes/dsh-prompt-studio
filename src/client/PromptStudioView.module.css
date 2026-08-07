@@ -390,6 +390,77 @@
   -webkit-line-clamp: 3;
 }
 
+.capturedText,
+.sourceDetails pre {
+  margin: 9px 0 0;
+  color: var(--dsw-alias-label-secondary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 19px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.sourceDetails {
+  margin-top: 9px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.sourceDetails summary {
+  width: fit-content;
+  cursor: pointer;
+}
+
+.resourceActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.readonlyResource,
+.readonlyNotice {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.readonlyResource {
+  padding: 5px 9px;
+}
+
+.readonlyNotice {
+  margin: 8px 0 0;
+}
+
+.resourceEditor {
+  margin-top: 10px;
+  padding: 12px;
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-module-platform);
+}
+
+.resourceEditorHeader,
+.resourceEditorFooter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.resourceEditorHeader {
+  margin-bottom: 8px;
+  color: var(--dsw-alias-label-primary);
+  font-size: 13px;
+}
+
+.resourceEditorFooter {
+  align-items: flex-start;
+  margin-top: 8px;
+}
+
 .emptyText {
   margin-top: 9px;
 }
@@ -553,9 +624,18 @@
   margin: 8px 0 0;
   padding: 8px 10px;
   border: 1px solid var(--dsw-alias-border-l2);
-  border-left: 3px solid var(--dsw-alias-accent-primary, #4a7dff);
+  border-left: 3px solid var(--dsw-alias-brand-primary);
   border-radius: 6px;
-  background: var(--dsw-alias-bg-module-hover, rgba(127, 127, 127, 0.08));
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.previewCaptured {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-left: 3px solid var(--dsw-alias-state-warn-label);
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-module-platform);
 }
 
 .previewSupplementTag {
@@ -566,7 +646,7 @@
   font-size: 11px;
   line-height: 18px;
   color: var(--dsw-alias-label-secondary);
-  background: var(--dsw-alias-bg-module-hover, rgba(127, 127, 127, 0.14));
+  background: var(--dsw-alias-interactive-bg-hover);
 }
 
 .previewSupplementText {
