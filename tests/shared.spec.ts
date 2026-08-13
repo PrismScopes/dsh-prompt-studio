@@ -34,7 +34,7 @@ describe('prompt-studio shared contract', () => {
       supplement({ id: 'supplement:system', role: 'system', position: undefined, order: 10, template: 'Middle.' }),
     ])
     expect(rows.map(row => row.id)).toEqual(['identity', 'supplement:system', 'override:persona'])
-    expect(renderSystemPreview(rows)).toContain('<supplement id="override:persona">\nChanged.\n</supplement>')
+    expect(renderSystemPreview(rows)).toBe('Identity.\n\nMiddle.\n\nChanged.')
   })
 
   it('validates role/position, runtime provenance, block type, and unique override targets', () => {
@@ -49,8 +49,8 @@ describe('prompt-studio shared contract', () => {
     }).toThrow('overridden more than once')
   })
 
-  it('keeps supplement boundaries attributable and escapes ids', () => {
-    expect(renderSupplementBoundary('a"<&', 'Body.')).toBe('<supplement id="a&quot;&lt;&amp;">\nBody.\n</supplement>')
+  it('renders supplements as plain content without wrapper markup', () => {
+    expect(renderSupplementBoundary('a"<&', 'Body.')).toBe('Body.')
   })
 
   it('allocates readable supplement and override ids', () => {

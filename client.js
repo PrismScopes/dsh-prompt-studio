@@ -81,12 +81,9 @@ window.__ModuleLoader__.load({
 				return candidate;
 			}
 		}
-		function escapeAttribute(value) {
-			return value.replaceAll("&", "&amp;").replaceAll("\"", "&quot;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
-		}
-		/** Wrap one supplement so its authorship remains visible inside merged content. */
-		function renderSupplementBoundary(id, text) {
-			return `<supplement id="${escapeAttribute(id)}">\n${text}\n</supplement>`;
+		/** Render one supplement as plain content without any wrapper markup. */
+		function renderSupplementBoundary(_id, text) {
+			return text;
 		}
 		function systemPreviewComponent(component) {
 			const snapshot = {
@@ -412,75 +409,75 @@ window.__ModuleLoader__.load({
 			document.head.appendChild(tag);
 		}
 		var PromptStudioView_module_css_default = {
-			"textField": "Ewsqaa_textField",
-			"textarea": "Ewsqaa_textarea",
-			"excerpt": "Ewsqaa_excerpt",
-			"kindBadge": "Ewsqaa_kindBadge",
-			"notice": "Ewsqaa_notice",
-			"field": "Ewsqaa_field",
-			"intro": "Ewsqaa_intro",
-			"readonlyResource": "Ewsqaa_readonlyResource",
-			"previewSystem": "Ewsqaa_previewSystem",
 			"previewSupplementTag": "Ewsqaa_previewSupplementTag",
-			"builtinList": "Ewsqaa_builtinList",
-			"error": "Ewsqaa_error",
-			"secondaryButton": "Ewsqaa_secondaryButton",
-			"sectionEditor": "Ewsqaa_sectionEditor",
-			"templateField": "Ewsqaa_templateField",
-			"textButton": "Ewsqaa_textButton",
-			"assemblyOrderValue": "Ewsqaa_assemblyOrderValue",
-			"readonlyNotice": "Ewsqaa_readonlyNotice",
-			"userCard": "Ewsqaa_userCard",
 			"subtitle": "Ewsqaa_subtitle",
-			"previewSupplement": "Ewsqaa_previewSupplement",
-			"resourceEditor": "Ewsqaa_resourceEditor",
-			"input": "Ewsqaa_input",
-			"preview": "Ewsqaa_preview",
-			"builtins": "Ewsqaa_builtins",
-			"status": "Ewsqaa_status",
-			"emptyText": "Ewsqaa_emptyText",
-			"componentList": "Ewsqaa_componentList",
-			"primaryButton": "Ewsqaa_primaryButton",
-			"sourceDetails": "Ewsqaa_sourceDetails",
-			"capturedText": "Ewsqaa_capturedText",
-			"sectionName": "Ewsqaa_sectionName",
-			"fieldLabel": "Ewsqaa_fieldLabel",
-			"resourceActions": "Ewsqaa_resourceActions",
-			"dangerButton": "Ewsqaa_dangerButton",
-			"caption": "Ewsqaa_caption",
-			"builtinText": "Ewsqaa_builtinText",
-			"origin": "Ewsqaa_origin",
-			"stateBadge": "Ewsqaa_stateBadge",
-			"userList": "Ewsqaa_userList",
-			"rowHeader": "Ewsqaa_rowHeader",
-			"previewCaptured": "Ewsqaa_previewCaptured",
-			"builtinCard": "Ewsqaa_builtinCard",
-			"resourceEditorFooter": "Ewsqaa_resourceEditorFooter",
-			"roleBadge": "Ewsqaa_roleBadge",
-			"assemblyOrder": "Ewsqaa_assemblyOrder",
-			"assemblyIndex": "Ewsqaa_assemblyIndex",
-			"editorColumn": "Ewsqaa_editorColumn",
-			"orderBadge": "Ewsqaa_orderBadge",
-			"select": "Ewsqaa_select",
-			"title": "Ewsqaa_title",
-			"columns": "Ewsqaa_columns",
-			"positionBadge": "Ewsqaa_positionBadge",
-			"componentCard": "Ewsqaa_componentCard",
-			"previewSupplementText": "Ewsqaa_previewSupplementText",
 			"componentEditor": "Ewsqaa_componentEditor",
-			"count": "Ewsqaa_count",
+			"resourceEditor": "Ewsqaa_resourceEditor",
+			"previewCaptured": "Ewsqaa_previewCaptured",
+			"intro": "Ewsqaa_intro",
+			"notice": "Ewsqaa_notice",
+			"resourceEditorFooter": "Ewsqaa_resourceEditorFooter",
+			"sectionEditor": "Ewsqaa_sectionEditor",
+			"readonlyNotice": "Ewsqaa_readonlyNotice",
 			"pageHeader": "Ewsqaa_pageHeader",
-			"headerActions": "Ewsqaa_headerActions",
-			"orderInput": "Ewsqaa_orderInput",
-			"builtinsSummary": "Ewsqaa_builtinsSummary",
-			"empty": "Ewsqaa_empty",
-			"root": "Ewsqaa_root",
-			"builtinTextField": "Ewsqaa_builtinTextField",
+			"componentList": "Ewsqaa_componentList",
+			"kindBadge": "Ewsqaa_kindBadge",
+			"componentCard": "Ewsqaa_componentCard",
+			"builtins": "Ewsqaa_builtins",
+			"readonlyResource": "Ewsqaa_readonlyResource",
+			"assemblyIndex": "Ewsqaa_assemblyIndex",
+			"columns": "Ewsqaa_columns",
+			"primaryButton": "Ewsqaa_primaryButton",
+			"assemblyOrder": "Ewsqaa_assemblyOrder",
+			"textarea": "Ewsqaa_textarea",
+			"textField": "Ewsqaa_textField",
+			"assemblyOrderValue": "Ewsqaa_assemblyOrderValue",
+			"count": "Ewsqaa_count",
+			"roleBadge": "Ewsqaa_roleBadge",
+			"stateBadge": "Ewsqaa_stateBadge",
+			"sourceDetails": "Ewsqaa_sourceDetails",
+			"builtinList": "Ewsqaa_builtinList",
 			"resourceEditorHeader": "Ewsqaa_resourceEditorHeader",
-			"sectionHeading": "Ewsqaa_sectionHeading",
-			"enabledControl": "Ewsqaa_enabledControl",
 			"assemblyRow": "Ewsqaa_assemblyRow",
-			"previewColumn": "Ewsqaa_previewColumn"
+			"origin": "Ewsqaa_origin",
+			"caption": "Ewsqaa_caption",
+			"input": "Ewsqaa_input",
+			"orderBadge": "Ewsqaa_orderBadge",
+			"previewSupplement": "Ewsqaa_previewSupplement",
+			"builtinCard": "Ewsqaa_builtinCard",
+			"userList": "Ewsqaa_userList",
+			"enabledControl": "Ewsqaa_enabledControl",
+			"orderInput": "Ewsqaa_orderInput",
+			"error": "Ewsqaa_error",
+			"title": "Ewsqaa_title",
+			"builtinText": "Ewsqaa_builtinText",
+			"sectionHeading": "Ewsqaa_sectionHeading",
+			"fieldLabel": "Ewsqaa_fieldLabel",
+			"capturedText": "Ewsqaa_capturedText",
+			"textButton": "Ewsqaa_textButton",
+			"root": "Ewsqaa_root",
+			"dangerButton": "Ewsqaa_dangerButton",
+			"status": "Ewsqaa_status",
+			"previewColumn": "Ewsqaa_previewColumn",
+			"sectionName": "Ewsqaa_sectionName",
+			"select": "Ewsqaa_select",
+			"emptyText": "Ewsqaa_emptyText",
+			"previewSystem": "Ewsqaa_previewSystem",
+			"preview": "Ewsqaa_preview",
+			"excerpt": "Ewsqaa_excerpt",
+			"headerActions": "Ewsqaa_headerActions",
+			"builtinsSummary": "Ewsqaa_builtinsSummary",
+			"previewSupplementText": "Ewsqaa_previewSupplementText",
+			"editorColumn": "Ewsqaa_editorColumn",
+			"field": "Ewsqaa_field",
+			"templateField": "Ewsqaa_templateField",
+			"userCard": "Ewsqaa_userCard",
+			"secondaryButton": "Ewsqaa_secondaryButton",
+			"rowHeader": "Ewsqaa_rowHeader",
+			"builtinTextField": "Ewsqaa_builtinTextField",
+			"resourceActions": "Ewsqaa_resourceActions",
+			"positionBadge": "Ewsqaa_positionBadge",
+			"empty": "Ewsqaa_empty"
 		};
 		//#endregion
 		//#region src/client/PromptStudioView.tsx
@@ -1258,7 +1255,8 @@ window.__ModuleLoader__.load({
 		const inject = [
 			"slots",
 			"conversation",
-			"connection"
+			"connection",
+			"remote"
 		];
 		/** Register the tab, its shared controller, and pushed invalidations. */
 		function apply(ctx) {
@@ -1279,7 +1277,7 @@ window.__ModuleLoader__.load({
 				const refresh = () => {
 					for (const { controller } of faces.values()) refreshIfLoaded(controller);
 				};
-				const disposers = [ctx.on("settings/changed", (namespace) => {
+				const disposers = [ctx.remote.$on("settings/document-updated", (namespace) => {
 					if (namespace === "prompt-studio") refresh();
 				}), ctx.on("connection/reset", refresh)];
 				return () => {

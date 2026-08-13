@@ -1,6 +1,7 @@
 /** Prompt Studio browser half: one live conversation-view contribution. */
 import type { ClientContext, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
 import { bindSnapshotSelector } from '@deepseek-ai/dsh-client-web-react'
+import type {} from '@deepseek-ai/dsh-api-remotes/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import {
@@ -18,7 +19,7 @@ export type { PromptStudioState } from './store.ts'
 export type { PromptStudioViewInjected, PromptStudioViewProps } from './PromptStudioView.tsx'
 
 /** Slot registry, declaration-order edge, and settings transport. */
-export const inject = ['slots', 'conversation', 'connection']
+export const inject = ['slots', 'conversation', 'connection', 'remote']
 
 /** Register the tab, its shared controller, and pushed invalidations. */
 export function apply(ctx: ClientContext): void {
@@ -38,7 +39,7 @@ export function apply(ctx: ClientContext): void {
       for (const { controller } of faces.values()) refreshIfLoaded(controller)
     }
     const disposers = [
-      ctx.on('settings/changed', (namespace) => {
+      ctx.remote.$on('settings/document-updated', (namespace) => {
         if (namespace === PROMPT_STUDIO_NAMESPACE) refresh()
       }),
       ctx.on('connection/reset', refresh),

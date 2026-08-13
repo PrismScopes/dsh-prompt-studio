@@ -34,7 +34,6 @@ async function ensureSymlink(path, target, ownedLinks) {
 async function prepareLinks(dshRoot) {
   const ownedLinks = []
   const clientModules = join(dshRoot, 'packages/client/runtime/node_modules')
-  const settingsModules = join(dshRoot, 'packages/settings/settings/node_modules')
   let removeNodeModules = false
   try {
     await lstat(join(pluginRoot, 'node_modules'))
@@ -44,8 +43,8 @@ async function prepareLinks(dshRoot) {
   }
   await ensureSymlink(join(pluginRoot, '.dsh'), dshRoot, ownedLinks)
   await ensureSymlink(join(pluginRoot, 'node_modules/react'), join(clientModules, 'react'), ownedLinks)
-  await ensureSymlink(join(pluginRoot, 'node_modules/cordis'), join(clientModules, 'cordis'), ownedLinks)
-  await ensureSymlink(join(pluginRoot, 'node_modules/schemastery'), join(settingsModules, 'schemastery'), ownedLinks)
+  await ensureSymlink(join(pluginRoot, 'node_modules/@deepseek-ai/schemastery'), join(dshRoot, 'vendor/schemastery'), ownedLinks)
+  await ensureSymlink(join(pluginRoot, 'node_modules/@deepseek-ai/cosmokit'), join(dshRoot, 'vendor/cosmokit'), ownedLinks)
   await ensureSymlink(join(pluginRoot, 'node_modules/@types'), join(clientModules, '@types'), ownedLinks)
   await ensureSymlink(join(pluginRoot, 'node_modules/vitest'), join(dshRoot, 'node_modules/vitest'), ownedLinks)
   await ensureSymlink(

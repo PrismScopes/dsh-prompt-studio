@@ -208,17 +208,9 @@ function uniqueComponentId(preferred: string, used: Set<string>): string {
   }
 }
 
-function escapeAttribute(value: string): string {
-  return value
-    .replaceAll('&', '&amp;')
-    .replaceAll('"', '&quot;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-}
-
-/** Wrap one supplement so its authorship remains visible inside merged content. */
-export function renderSupplementBoundary(id: string, text: string): string {
-  return `<supplement id="${escapeAttribute(id)}">\n${text}\n</supplement>`
+/** Render one supplement as plain content without any wrapper markup. */
+export function renderSupplementBoundary(_id: string, text: string): string {
+  return text
 }
 
 interface OrderedSystemComponent {

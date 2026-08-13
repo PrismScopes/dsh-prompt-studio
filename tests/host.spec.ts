@@ -1,12 +1,12 @@
-import { Context } from 'cordis'
+import { Context } from '@deepseek-ai/cordis'
 import { describe, expect, it } from 'vitest'
-import LlmService, {
+import LlmRuntime, {
   createUserMessage,
   deepFreeze,
   markAgentLoopRequest,
   type GenerateOptions,
 } from '@deepseek-ai/dsh-llm'
-import { Settings, type SettingsNamespace } from '@deepseek-ai/dsh-settings'
+import { SettingsProvider, type SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import SystemPrompt, { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import {
@@ -15,7 +15,7 @@ import {
   inject,
 } from '../src/index.ts'
 
-class MemorySettings extends Settings {
+class MemorySettings extends SettingsProvider {
   constructor(ctx: Context, readonly doc: Record<string, unknown> = {}) { super(ctx) }
   get writable(): boolean { return true }
   protected load(): Promise<Record<string, unknown>> { return Promise.resolve(structuredClone(this.doc)) }
@@ -30,7 +30,7 @@ interface RegisteredRoute {
   handler: (request: unknown, response: unknown) => void | Promise<void>
 }
 
-class MemoryHttpServer {
+class MemoryWebServer {
   readonly routes = new Map<string, RegisteredRoute>()
   register(route: RegisteredRoute): () => void {
     this.routes.set(route.path, route)
@@ -53,15 +53,15 @@ class MemoryHttpServer {
 
 async function boot(doc: Record<string, unknown> = {}) {
   const ctx = new Context()
-  await ctx.plugin(LlmService)
+  await ctx.plugin(LlmRuntime)
   await ctx.plugin(SessionStore)
   await ctx.plugin(MemorySettings, doc)
   await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, persona: 'Persona.' })
-  const httpServer = new MemoryHttpServer()
-  ctx.provide('httpServer', httpServer as never)
+  const webServer = new MemoryWebServer()
+  ctx.provide('webServer', webServer as never)
   const fiber = ctx.plugin({ name: 'prompt-studio-test', inject: [...inject], apply })
   await fiber.await()
-  return { ctx, fiber, httpServer }
+  return { ctx, fiber, webServer }
 }
 
 describe('Prompt Studio Host composition', () => {
@@ -75,12 +75,12 @@ describe('Prompt Studio Host composition', () => {
       value: { components: [component] }, applies: 'live',
     })
     expect(renderPrompt(await ctx.systemPrompt.assemble())).toBe(
-      'Persona.\n\n<supplement id="supplement:system">\nConfigured.\n</supplement>',
+      'Persona.\n\nConfigured.',
     )
   })
 
   it('captures unknown context producers from a real frozen llm/stream request', async () => {
-    const { ctx, httpServer } = await boot()
+    const { ctx, webServer } = await boot()
     const sessionId = SessionId('capture-session')
     ctx.sessions.create(sessionId, { meta: { cwd: '/workspace' } })
     const direct = createUserMessage({ content: [{ type: 'text', text: 'Go' }], source: { kind: 'user' } })
@@ -101,7 +101,7 @@ describe('Prompt Studio Host composition', () => {
     } satisfies GenerateOptions))
     for await (const _chunk of ctx.llm.stream(request)) { /* exhaust the real waterfall */ }
 
-    const response = await httpServer.get('/prompt-studio/state?sessionId=capture-session')
+    const response = await webServer.get('/prompt-studio/state?sessionId=capture-session')
     expect(response.status).toBe(200)
     expect(response.value).toMatchObject({
       sessionId: 'capture-session',

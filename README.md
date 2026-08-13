@@ -1,6 +1,6 @@
-# moeblack/prompt-studio
+# dsh-prompt-studio
 
-Prompt Studio 的插件分发形态。插件在对话页注册 **Prompt Studio** 标签页，以同一组件列表展示运行时原生提示词和用户补充，并提供编辑、原生覆盖与完整请求预览。
+Prompt Studio 的 DeepSeek Harness 插件分发形态。插件在对话页注册 **Prompt Studio** 标签页，以同一组件列表展示运行时原生提示词和用户补充，并提供编辑、原生覆盖与完整请求预览。
 
 ## 组件模型
 
@@ -38,17 +38,11 @@ interface PromptComponent {
 
 同一消息间隙的补充组件按 `(order, 声明顺序)` 排列。system sections 由 Host 依 `order` 与原生 sections 全局混排。
 
-## 内容合并与边界
+## 内容合并
 
-所有 system sections 最终渲染为同一个 `system` 字符串。每段补充内容在该字符串内部保留以下边界，原生内容不加包装：
+所有 system sections 最终渲染为同一个 `system` 字符串，补充内容以纯文本直接并入，不加任何包装标记。
 
-```xml
-<supplement id="supplement:example">
-补充提示词正文
-</supplement>
-```
-
-user/assistant 补充先进入选定间隙。若补充组与间隙左侧或右侧的相邻原生消息 `role` 相同，补充边界块会按先后关系合并进该原生消息的 `content`；若角色不同，则在该间隙创建新消息。相邻且同角色的补充也合并为一条消息，同时保留每个补充各自的 `<supplement>` 边界。
+user/assistant 补充先进入选定间隙。若补充组与间隙左侧或右侧的相邻原生消息 `role` 相同，补充内容会按先后关系合并进该原生消息的 `content`；若角色不同，则在该间隙创建新消息。相邻且同角色的补充也合并为一条消息。
 
 ## 原生覆盖
 
@@ -65,7 +59,7 @@ user/assistant 补充先进入选定间隙。若补充组与间隙左侧或右�
 
 原生目录在运行时动态发现。插件监听 `system-prompt/change` 并重新执行真实 `systemPrompt.assemble()`；waterfall 在覆盖前捕获原生 name、text 与组装次序，在覆盖后捕获实际 system 槽序列。浏览器通过同源 `GET /prompt-studio/state` 读取该单值快照。
 
-system 补充直接通过 `systemPrompt.section()` 参与真实组装，不进入消息计划。user/assistant 补充在 system-prompt 组装时冻结本轮组件与活变量，再通过 `llm/stream` 的既有扩展接缝生成一次性请求副本。消息补充只进入本次模型请求，不写入会话记录。
+system 补充直接通过 `systemPrompt.section()` 参与真实组装，不进入消息计划。user/assistant 补充在会话创建时折叠为一条种子回合（turn 0），经 `session/created` 接缝写入会话日志：用户侧内容合并为一条带普通 `user` 来源的消息，助手侧内容合并为一条带插件来源的消息，位于智能体第一个真实回合之前。消息补充因此成为会话历史的一部分，随会话重建与继续保留。
 
 ## 自动捕获注入上下文
 
@@ -77,13 +71,7 @@ system 补充直接通过 `systemPrompt.section()` 参与真实组装，不进�
 
 ## 模板变量
 
-模板支持以下引用：
-
-- `{{user_input}}`：当前会话最后一条真实用户输入；
-- `{{model}}`：当前 Agent 选择的模型；
-- `{{cwd}}`：当前会话工作目录。
-
-这些值在每次组装时从 `AssembleContext.agent`、`agent.session` 和当前 Agent 选项读取，不是保存时快照。
+system 组件模板支持 `{{user_input}}` 引用，即当前会话最后一条真实用户输入。该值在每次组装时从 `AssembleContext.agent` 读取，不是保存时快照。
 
 ## 设置
 
@@ -114,19 +102,21 @@ prompt-studio:
 1. 打开任意对话，选择 **Prompt Studio** 标签页。
 2. 选择 **新增补充**，分别编辑标识、角色、顺序、可选覆盖目标与模板；只有 user/assistant 角色显示消息间隙选择器。
 3. 如需覆盖原生组件，也可在对应原生行选择 **创建覆盖**；生成的仍是 `kind=supplement` 组件，只是带有 `origin`。
-4. 在 **完整预览** 中检查合并后的完整 system 内容及各消息间隙的补充内容。模型内容预览不插入 `[位置 · role · id]` 一类展示标签，补充来源只由实际发送的 `<supplement>` 边界表示。
+4. 在 **完整预览** 中检查合并后的完整 system 内容及各消息间隙的补充内容。模型内容预览不插入 `[位置 · role · id]` 一类展示标签，补充内容以纯文本直接注入。
 5. 选择 **保存更改**。设置保存后立即撤销旧组合并施加新组合。
 
 ## 安装与启用
 
+Prompt Studio 以**组合包（bundle）**分发：`package.json` 的 `dsh.bundle.patch` 指向 `cordis.patch.yml`，`dsh.client` 声明浏览器端注入面。安装进一个 profile：
+
 ```sh
-export DSH_HOME=/path/to/dsh-data
-/path/to/dsh/bin/dsh plugin install /path/to/dsh-prompt-studio
-/path/to/dsh/bin/dsh plugin enable moeblack/prompt-studio
-/path/to/dsh/bin/dsh plugin list
+# 先完成构建（见下），再安装到 profile（profile 名可自取，例如 web）
+dsh plugin --profile web add /path/to/dsh-prompt-studio
+dsh --profile web --dump-config   # 应能看到 "# == dsh-prompt-studio" 层
+dsh web                           # 或 dsh --profile web
 ```
 
-安装后默认禁用；启用索引由 DSH plugin registry 管理。命令行与已经运行的 Web 进程不共享内存，因此启用或替换插件产物后需重启 `dsh web` 并刷新浏览器。
+`dsh plugin --profile <name> add <path>` 会把包链接进 profile 并把包名追加进 `dsh.profile.bundles`。已安装的 bundle 通过 `dsh plugin --profile <name> remove dsh-prompt-studio` 移除。命令行与已经运行的 Web 进程不共享内存，因此替换插件产物后需重启 `dsh web` 并刷新浏览器。
 
 ## 构建
 
@@ -146,8 +136,9 @@ DSH_ROOT=/path/to/dsh node scripts/build.mjs
 
 | 文件 | 作用 |
 |---|---|
-| `dsh.plugin.json` | 插件清单、服务端入口与浏览器端入口 |
-| `src/index.ts` | 效果管线、动态目录、原生覆盖与发送前注入 |
+| `package.json` | 包名（唯一权威 id）、`dsh.bundle.patch` 与 `dsh.client` 声明 |
+| `cordis.patch.yml` | 组合层：把包名插入 profile 的 patch 列表 |
+| `src/index.ts` | 效果管线、动态目录、原生覆盖与种子回合注入 |
 | `src/shared.ts` | 二分组件模型、校验、覆盖判定与预览函数 |
 | `src/config.ts` | 仅含 `components` 的 settings schema |
 | `src/client/` | 统一列表编辑器、运行时目录读取与设置保存 |
@@ -155,4 +146,5 @@ DSH_ROOT=/path/to/dsh node scripts/build.mjs
 
 ## 已知前提
 
-浏览器端读写 `prompt-studio` 配置段，需要宿主在 `PRODUCT_SETTINGS_NAMESPACES` 中公开 `'prompt-studio'`。当前 DSH 官方 plugin-registry 集成环境已经包含该项。
+- 设置命名空间 `prompt-studio` 由插件在加载时自行注册（`applies: 'live'`），宿主无需任何白名单。
+- `/prompt-studio/*` HTTP 端点注册在 `webServer` 服务上，仅在 Web 组合下可用；无 Web 时插件仍可正常加载，只是不提供 HTTP 端点与浏览器标签页。

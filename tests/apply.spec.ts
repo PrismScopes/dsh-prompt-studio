@@ -1,16 +1,23 @@
-import { Context } from 'cordis'
+import { Context } from '@deepseek-ai/cordis'
 import { describe, expect, it, vi } from 'vitest'
-import { SlotsService } from '@deepseek-ai/dsh-client-runtime/client'
+import { SlotRegistry } from '@deepseek-ai/dsh-client-runtime/client'
 import { apply, inject } from '../src/client/index.ts'
 import { PromptStudioView } from '../src/client/PromptStudioView.tsx'
 import type { PromptStudioViewInjected } from '../src/client/PromptStudioView.tsx'
 
 async function bench() {
   const ctx = new Context()
-  await ctx.plugin(SlotsService).await()
+  await ctx.plugin(SlotRegistry).await()
   ctx.provide('conversation', {} as never)
   ctx.provide('connection', { api: { settings: {} } } as never)
-  const slots = ctx.get('slots') as SlotsService
+  const remoteHandlers = new Map<string, (namespace: string) => void>()
+  ctx.provide('remote', {
+    $on: (event: string, handler: (namespace: string) => void) => {
+      remoteHandlers.set(event, handler)
+      return () => { remoteHandlers.delete(event) }
+    },
+  } as never)
+  const slots = ctx.get('slots') as SlotRegistry
   slots.register({
     name: 'root',
     children: {
@@ -19,7 +26,7 @@ async function bench() {
     },
   } as never, () => null)
   await ctx.plugin({ inject: [...inject], apply }).await()
-  return { ctx, slots }
+  return { ctx, slots, remoteHandlers }
 }
 
 describe('Prompt Studio browser apply', () => {
@@ -37,7 +44,7 @@ describe('Prompt Studio browser apply', () => {
   })
 
   it('refreshes every loaded session controller on relevant invalidations', async () => {
-    const { ctx, slots } = await bench()
+    const { ctx, slots, remoteHandlers } = await bench()
     const injectFace = slots.entries('conversation.view')[0]!.inject as unknown as (sessionId: string) => PromptStudioViewInjected
     const a = injectFace('session-a')
     const b = injectFace('session-b')
@@ -46,9 +53,10 @@ describe('Prompt Studio browser apply', () => {
     const loadA = vi.spyOn(a.controller, 'load').mockResolvedValue()
     const loadB = vi.spyOn(b.controller, 'load').mockResolvedValue()
 
-    ctx.emit('settings/changed', 'unrelated')
+    const settingsUpdated = remoteHandlers.get('settings/document-updated')!
+    settingsUpdated('unrelated')
     expect(loadA).not.toHaveBeenCalled()
-    ctx.emit('settings/changed', 'prompt-studio')
+    settingsUpdated('prompt-studio')
     ctx.emit('connection/reset')
     expect(loadA).toHaveBeenCalledTimes(2)
     expect(loadB).toHaveBeenCalledTimes(2)

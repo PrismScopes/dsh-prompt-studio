@@ -1,8 +1,7 @@
 {
   "name": "dsh-prompt-studio",
-  "description": "Registry-distributed Prompt Studio plugin for DeepSeek Harness",
-  "version": "0.3.0",
-  "private": true,
+  "description": "Prompt Studio plugin for DeepSeek Harness: compose runtime prompts, overrides, and request-local synthetic turns in one live editor",
+  "version": "0.4.0",
   "type": "module",
   "main": "./index.mjs",
   "exports": {
@@ -21,16 +20,16 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-api-remotes"
+      ]
     }
-  },
-  "dshClient": {
-    "platform": "web",
-    "inject": [
-      "@deepseek-ai/dsh-client-connection",
-      "@deepseek-ai/dsh-client-runtime",
-      "@deepseek-ai/dsh-client-ui-conversation",
-      "@deepseek-ai/dsh-client-ui-settings"
-    ]
   },
   "scripts": {
     "build": "node ./scripts/build.mjs",

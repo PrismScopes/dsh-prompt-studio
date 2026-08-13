@@ -35,7 +35,10 @@
       "path": "./.dsh/packages/settings/settings"
     },
     {
-      "path": "./.dsh/packages/client/connection"
+      "path": "./.dsh/packages/host/webserver"
+    },
+    {
+      "path": "./.dsh/packages/client/connection/tsconfig.client.json"
     },
     {
       "path": "./.dsh/packages/client/runtime"
@@ -51,6 +54,9 @@
     },
     {
       "path": "./.dsh/packages/client/ui-settings"
+    },
+    {
+      "path": "./.dsh/packages/api/remotes/tsconfig.client.json"
     }
   ]
 }

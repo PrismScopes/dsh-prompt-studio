@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { readFile, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-//#region ../dsh-2026/vendor/cosmokit/src/misc.ts
+//#region ../dsh-oss/vendor/cosmokit/src/misc.ts
 /** Return true when a value is `null` or `undefined`. */
 function isNullable(value) {
 	return value === null || value === void 0;
@@ -27,7 +27,7 @@ function pick(source, keys, forced) {
 	return result;
 }
 //#endregion
-//#region ../dsh-2026/vendor/cosmokit/src/types.ts
+//#region ../dsh-oss/vendor/cosmokit/src/types.ts
 /** Test values using `instanceof` with a `toStringTag` fallback. */
 function is(type, value) {
 	if (arguments.length === 1) return (value) => is(type, value);
@@ -129,7 +129,7 @@ function deepEqual(a, b, strict) {
 	}).every((key) => deepEqual(a[key], b[key], strict));
 }
 //#endregion
-//#region ../dsh-2026/vendor/cosmokit/src/time.ts
+//#region ../dsh-oss/vendor/cosmokit/src/time.ts
 let Time;
 (function(_Time) {
 	_Time.millisecond = 1;
@@ -200,7 +200,7 @@ let Time;
 	_Time.template = template;
 })(Time || (Time = {}));
 //#endregion
-//#region ../dsh-2026/vendor/schemastery/src/index.ts
+//#region ../dsh-oss/vendor/schemastery/src/index.ts
 const kSchema = Symbol.for("schemastery");
 const kValidationError = Symbol.for("ValidationError");
 globalThis.__schemastery_index__ ??= 0;
@@ -876,12 +876,9 @@ function uniqueComponentId(preferred, used) {
 		return candidate;
 	}
 }
-function escapeAttribute(value) {
-	return value.replaceAll("&", "&amp;").replaceAll("\"", "&quot;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
-}
-/** Wrap one supplement so its authorship remains visible inside merged content. */
-function renderSupplementBoundary(id, text) {
-	return `<supplement id="${escapeAttribute(id)}">\n${text}\n</supplement>`;
+/** Render one supplement as plain content without any wrapper markup. */
+function renderSupplementBoundary(_id, text) {
+	return text;
 }
 function systemPreviewComponent(component) {
 	const snapshot = {
@@ -1335,162 +1332,70 @@ function latestUserInput(agent) {
 		return event.data.content.filter((block) => block.type === "text").map((block) => block.text).join("\n");
 	}
 }
-function liveVariables(agent) {
+/** One seed turn folding all configured user/assistant supplements. */
+function injectionSeedTurn(components) {
+	const userText = components.filter((component) => component.role === "user").map((component) => renderSupplementBoundary(component.id, component.template)).join("\n\n");
+	const assistantText = components.filter((component) => component.role === "assistant").map((component) => renderSupplementBoundary(component.id, component.template)).join("\n\n");
+	if (userText.length === 0 && assistantText.length === 0) return void 0;
 	return {
-		user_input: latestUserInput(agent),
-		model: agent.options.model,
-		cwd: agent.session.header.cwd
+		userText,
+		assistantText
 	};
 }
-function renderComponentTemplate(component, agent) {
-	const variables = liveVariables(agent);
-	return component.template.replace(/\{\{([^{}]*)\}\}/g, (reference, name) => {
-		if (!Object.hasOwn(variables, name)) throw new Error(`unknown prompt variable "${reference}" in component "${component.id}"`);
-		const value = variables[name];
-		if (value === void 0) throw new Error(`prompt variable "${reference}" has no value in component "${component.id}"`);
-		return value;
+/**
+* Append the configured injection dialogue as the session seed turn (turn 0,
+* before the agent's first real turn). The user message carries a plain user
+* source so message-edit treats it as the turn's user input; the assistant
+* message keeps plugin provenance for tracing.
+*/
+function appendInjectionTurn(session, components) {
+	const seed = injectionSeedTurn(components);
+	if (seed === void 0) return;
+	const { userText, assistantText } = seed;
+	const turn = 0;
+	session.append("turn/start", { turn });
+	session.append("step/start", {
+		turn,
+		step: 1
 	});
-}
-/** Request-owned supplementary plans materialized during the matching assembly. */
-var SupplementPlans = class {
-	bySession = /* @__PURE__ */ new Map();
-	prepare(agent, components) {
-		if (agent === void 0) return;
-		const plan = components.flatMap((component, declaration) => {
-			if (component.role === "system" || component.position === void 0) return [];
-			return [{
-				id: component.id,
-				position: component.position,
-				role: component.role,
-				order: component.order,
-				text: renderComponentTemplate(component, agent),
-				blockType: component.blockType ?? "text",
-				declaration
-			}];
-		});
-		if (plan.length === 0) {
-			this.bySession.delete(String(agent.session.id));
-			return;
-		}
-		this.bySession.set(String(agent.session.id), plan);
-	}
-	take(sessionId) {
-		const plan = this.bySession.get(sessionId);
-		this.bySession.delete(sessionId);
-		return plan;
-	}
-	clear() {
-		this.bySession.clear();
-	}
-};
-function supplementBlock(supplement) {
-	const text = renderSupplementBoundary(supplement.id, supplement.text);
-	return Object.freeze(supplement.blockType === "reasoning" ? {
-		type: "reasoning",
-		text
-	} : {
-		type: "text",
-		text
-	});
-}
-function supplementalMessage(supplement) {
-	return Object.freeze({
+	if (userText.length > 0) session.append("user/message", {
 		id: crypto.randomUUID(),
-		role: supplement.role,
-		content: Object.freeze([supplementBlock(supplement)]),
-		source: Object.freeze({
-			kind: "plugin",
-			plugin: PROMPT_STUDIO_MESSAGE_SOURCE
-		})
-	});
-}
-function supplementsAt(plan, position) {
-	return plan.filter((item) => item.position === position).sort((left, right) => left.order - right.order || left.declaration - right.declaration);
-}
-function mergeSupplementAfter(message, supplement) {
-	const block = supplementBlock(supplement);
-	const text = block.text ?? "";
-	const withBoundary = block.type === "reasoning" ? block : Object.freeze({
-		type: "text",
-		text: `\n\n${text}`
-	});
-	return Object.freeze({
-		...message,
-		content: Object.freeze([...message.content, withBoundary])
-	});
-}
-function supplementalGroups(plan) {
-	const groups = [];
-	for (const supplement of plan) {
-		const previous = groups.at(-1);
-		if (previous?.role === supplement.role) groups[groups.length - 1] = mergeSupplementAfter(previous, supplement);
-		else groups.push(supplementalMessage(supplement));
-	}
-	return groups;
-}
-function groupText(message) {
-	return message.content.filter((block) => block.type === "text").map((block) => block.text).join("");
-}
-function mergeGroup(native, group, placement) {
-	const text = groupText(group);
-	const boundaryBlock = Object.freeze({
-		type: "text",
-		text: placement === "before" ? `${text}\n\n` : `\n\n${text}`
-	});
-	const content = placement === "before" ? [boundaryBlock, ...native.content] : [...native.content, boundaryBlock];
-	return Object.freeze({
-		...native,
-		content: Object.freeze(content)
-	});
-}
-function insertGap(leftMessages, rightMessages, supplements) {
-	const left = [...leftMessages];
-	const right = [...rightMessages];
-	const groups = supplementalGroups(supplements);
-	const leftNeighbor = left.at(-1);
-	const firstGroup = groups[0];
-	if (leftNeighbor !== void 0 && firstGroup?.role === leftNeighbor.role) {
-		left[left.length - 1] = mergeGroup(leftNeighbor, firstGroup, "after");
-		groups.shift();
-	}
-	const rightNeighbor = right[0];
-	const lastGroup = groups.at(-1);
-	if (rightNeighbor !== void 0 && lastGroup?.role === rightNeighbor.role) {
-		right[0] = mergeGroup(rightNeighbor, lastGroup, "before");
-		groups.pop();
-	}
-	return [
-		...left,
-		...groups,
-		...right
-	];
-}
-function insertSupplements(nativeMessages, plan) {
-	const afterSystem = supplementsAt(plan, "after_system");
-	const anchored = supplementsAt(plan, "anchored");
-	const tail = supplementsAt(plan, "tail");
-	let anchor = -1;
-	for (let index = nativeMessages.length - 1; index >= 0; index -= 1) {
-		const message = nativeMessages[index];
-		if (message?.role === "user" && message.source.kind === "user") {
-			anchor = index;
-			break;
+		role: "user",
+		content: [{
+			type: "text",
+			text: userText
+		}],
+		source: { kind: "user" }
+	}, { surfaceOp: "append" });
+	if (assistantText.length > 0) session.append("assistant/message", {
+		turn,
+		step: 1,
+		message: {
+			id: crypto.randomUUID(),
+			role: "assistant",
+			content: [{
+				type: "text",
+				text: assistantText
+			}],
+			source: {
+				kind: "plugin",
+				plugin: PROMPT_STUDIO_MESSAGE_SOURCE
+			}
 		}
-	}
-	return insertGap(insertGap([], anchor < 0 ? [...nativeMessages] : insertGap(nativeMessages.slice(0, anchor + 1), nativeMessages.slice(anchor + 1), anchored), afterSystem), [], tail);
-}
-function rewriteRequest(ctx, plans, catalog, options, next) {
-	if (!(options.sessionId !== void 0 && options.purpose === void 0 && Object.isFrozen(options) && Object.isFrozen(options.messages)) || options.sessionId === void 0) return next();
-	catalog.commitRequest(String(options.sessionId), options.messages);
-	const plan = plans.take(String(options.sessionId));
-	if (plan === void 0) return next();
-	const messages = insertSupplements(options.messages, plan);
-	Object.freeze(messages);
-	const rewritten = Object.freeze({
-		...options,
-		messages
+	}, { surfaceOp: "append" });
+	session.append("step/end", {
+		turn,
+		step: 1
 	});
-	return ctx.llm.stream(rewritten);
+	session.append("turn/end", {
+		turn,
+		reason: { kind: "completed" }
+	});
+}
+function rewriteRequest(catalog, options, next) {
+	if (options.sessionId === void 0 || options.purpose !== void 0) return next();
+	catalog.commitRequest(String(options.sessionId), options.messages);
+	return next();
 }
 function respondJson(response, status, value, head = false) {
 	const body = JSON.stringify(value);
@@ -1502,15 +1407,13 @@ function respondJson(response, status, value, head = false) {
 }
 function requestJson(request) {
 	return new Promise((resolve, reject) => {
-		const decoder = new TextDecoder();
-		let text = "";
+		const chunks = [];
 		request.on("data", (chunk) => {
-			text += typeof chunk === "string" ? chunk : decoder.decode(chunk, { stream: true });
+			chunks.push(chunk);
 		});
 		request.on("end", () => {
 			try {
-				text += decoder.decode();
-				resolve(JSON.parse(text));
+				resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")));
 			} catch (error) {
 				reject(error);
 			}
@@ -1587,8 +1490,8 @@ function settingsUpdate(value) {
 	};
 }
 function installRoutes(ctx, catalog) {
-	ctx.inject(["httpServer"], (routeCtx) => {
-		routeCtx.effect(() => routeCtx.httpServer.register({
+	ctx.inject(["webServer"], (routeCtx) => {
+		routeCtx.effect(() => routeCtx.webServer.register({
 			kind: "exact",
 			path: PROMPT_STUDIO_STATE_PATH,
 			handler: (request, response) => {
@@ -1601,7 +1504,7 @@ function installRoutes(ctx, catalog) {
 				respondJson(response, 200, catalog.snapshot(sessionId), request.method === "HEAD");
 			}
 		}), "prompt-studio: runtime catalog route");
-		routeCtx.effect(() => routeCtx.httpServer.register({
+		routeCtx.effect(() => routeCtx.webServer.register({
 			kind: "exact",
 			path: PROMPT_STUDIO_SETTINGS_PATH,
 			handler: async (request, response) => {
@@ -1624,7 +1527,7 @@ function installRoutes(ctx, catalog) {
 				}
 			}
 		}), "prompt-studio: settings route");
-		routeCtx.effect(() => routeCtx.httpServer.register({
+		routeCtx.effect(() => routeCtx.webServer.register({
 			kind: "exact",
 			path: PROMPT_STUDIO_RESOURCE_PATH,
 			handler: async (request, response) => {
@@ -1656,14 +1559,12 @@ async function apply(ctx) {
 	const bindings = new RuntimeBindings();
 	const pipeline = new ComponentPipeline(ctx, bindings);
 	const catalog = new RuntimeCatalogStore();
-	const plans = new SupplementPlans();
 	ctx.systemPrompt.variable("user_input", (context) => context.agent === void 0 ? void 0 : latestUserInput(context.agent));
-	ctx.on("system-prompt/assemble", async (assembly, context, next) => {
+	ctx.on("system-prompt/assemble", async (assembly, _context, next) => {
 		const native = runtimeNative(assembly.sections, bindings.ownedSectionNames);
-		const matchedOverrideIds = applyOverrides(assembly, bindings.overridesByMarker);
+		applyOverrides(assembly, bindings.overridesByMarker);
 		const resolved = await next();
 		catalog.commit(native, effectiveAssembly(resolved.sections, bindings.systemBySection));
-		plans.prepare(context.agent, [...bindings.supplements.values()].filter((component) => component.role !== "system" && (!isNativeOverride(component) || matchedOverrideIds.has(component.id))));
 		return resolved;
 	}, { prepend: true });
 	let refreshRequested = false;
@@ -1685,10 +1586,15 @@ async function apply(ctx) {
 		});
 	};
 	ctx.on("system-prompt/change", requestRefresh);
-	ctx.on("llm/stream", (options, next) => rewriteRequest(ctx, plans, catalog, options, next));
-	ctx.effect(() => () => {
-		plans.clear();
-	}, "prompt-studio: supplementary request plans");
+	ctx.on("llm/stream", (options, next) => rewriteRequest(catalog, options, next));
+	ctx.on("session/created", (session) => {
+		try {
+			appendInjectionTurn(session, [...bindings.supplements.values()]);
+		} catch (error) {
+			ctx.logger.warn("prompt-studio: injection seed turn failed");
+			ctx.logger.warn(error);
+		}
+	}, { prepend: true });
 	installRoutes(ctx, catalog);
 	const initial = scope.get();
 	validatePromptComponents(initial.components);
